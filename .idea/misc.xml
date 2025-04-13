@@ -1,0 +1,20 @@
+<<<<<<< HEAD
+=======
+<?xml version="1.0" encoding="UTF-8"?>
+>>>>>>> 02eb45e51d1294e8a7e59ccebf50e7869c63d64a
+<project version="4">
+  <component name="Black">
+    <option name="sdkName" value="Python 3.8 (ML) (2)" />
+  </component>
+  <component name="DiscordProjectSettings">
+    <option name="show" value="ASK" />
+    <option name="description" value="" />
+  </component>
+<<<<<<< HEAD
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_17" default="true" project-jdk-name="openjdk-21" project-jdk-type="JavaSDK">
+=======
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_21" default="true" project-jdk-name="openjdk-21" project-jdk-type="JavaSDK">
+>>>>>>> 02eb45e51d1294e8a7e59ccebf50e7869c63d64a
+    <output url="file://$PROJECT_DIR$/out" />
+  </component>
+</project>
