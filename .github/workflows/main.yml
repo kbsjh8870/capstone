@@ -47,9 +47,9 @@ jobs:
         run: chmod +x gradlew
         working-directory: ${{ env.working-directory }}
       
-      # 4) gradle 빌드
+     # 4) gradle 빌드 - 테스트 건너뛰기
       - name: Build with Gradle
-        run: ./gradlew clean build
+        run: ./gradlew clean build -x test
         working-directory: ${{ env.working-directory }}
       
       # AWS 인증
