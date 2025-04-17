@@ -1,36 +1,25 @@
-// activity/MapActivity.java
 package com.example.front.activity;
 
 import android.Manifest;
+import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.location.Location;
+import android.location.LocationManager;
 import android.os.Bundle;
+import android.util.Log;
+import android.widget.RelativeLayout;
 import android.widget.Toast;
-
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
-
 import com.example.front.R;
-import com.example.front.api.ApiClient;
-import com.example.front.api.WeatherNaviApi;
-import com.example.front.model.RouteResponse;
-import com.skt.Tmap.TMapData;
+import com.skt.Tmap.TMapGpsManager;
 import com.skt.Tmap.TMapPoint;
-import com.skt.Tmap.TMapPolyLine;
 import com.skt.Tmap.TMapView;
 
-import java.util.ArrayList;
-import java.util.List;
-
-import retrofit2.Call;
-import retrofit2.Callback;
-import retrofit2.Response;
-
-public class MapActivity extends AppCompatActivity {
-
+public class MapActivity extends AppCompatActivity implements TMapGpsManager.onLocationChangedCallback{
     private TMapView tMapView;
-    private WeatherNaviApi weatherNaviApi;
     private static final int LOCATION_PERMISSION_REQUEST_CODE = 1000;
 
     @Override
@@ -38,15 +27,31 @@ public class MapActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_map);
 
-        // Retrofit 클라이언트 초기화
-        weatherNaviApi = ApiClient.getClient().create(WeatherNaviApi.class);
+        try {
+            // 레이아웃 찾기
+            RelativeLayout mapLayout = findViewById(R.id.map_layout);
 
-        // TMap 초기화
-        tMapView = findViewById(R.id.map_view);
-        tMapView.setSKTMapApiKey("YOUR_TMAP_API_KEY");
+            // TMapView 생성
+            tMapView = new TMapView(this);
 
-        // 위치 권한 확인
-        checkLocationPermission();
+            // API 키 설정
+            String apiKey = "vU7PQGq7eR8bMAnPeg6F285MVcSpXW9W7wNV57JZ";
+            tMapView.setSKTMapApiKey(apiKey);
+
+            // 지도 설정
+            tMapView.setZoomLevel(15);
+           // tMapView.setCenterPoint(35.148528664420034, 129.0345323654562);
+
+            // 레이아웃에 추가
+            mapLayout.addView(tMapView);
+
+            checkLocationPermission();
+
+            Toast.makeText(this, "TMapView 초기화 성공", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "오류: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            e.printStackTrace();
+        }
     }
 
     private void checkLocationPermission() {
@@ -77,105 +82,68 @@ public class MapActivity extends AppCompatActivity {
     }
 
     private void initMap() {
-        // 지도 초기 설정
-        tMapView.setZoomLevel(15);
+        // 위치 서비스가 활성화되어 있는지 확인
+        LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        boolean isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+        boolean isNetworkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+
+        if (!isGpsEnabled && !isNetworkEnabled) {
+            Toast.makeText(this, "위치 서비스를 활성화해주세요", Toast.LENGTH_LONG).show();
+            // 위치 설정 화면으로 이동하는 코드 추가 가능
+            return;
+        }
+
         tMapView.setIconVisibility(true);
-        tMapView.setTrackingMode(true);
-        tMapView.setSightVisible(true);
-
-        // 테스트를 위한 시작점과 도착점 설정 (서울 시청과 광화문)
-        double startLat = 37.566295;
-        double startLng = 126.977945;
-        double endLat = 37.575268;
-        double endLng = 126.976896;
-
-        // 백엔드 API를 통해 경로 데이터 요청
-        requestRoute(startLat, startLng, endLat, endLng);
+        showMyLocation();
     }
 
-    private void requestRoute(double startLat, double startLng, double endLat, double endLng) {
-        Call<RouteResponse> call = weatherNaviApi.getWalkingRoute(startLat, startLng, endLat, endLng);
 
-        call.enqueue(new Callback<RouteResponse>() {
-            @Override
-            public void onResponse(Call<RouteResponse> call, Response<RouteResponse> response) {
-                if (response.isSuccessful() && response.body() != null) {
-                    drawRoute(response.body());
-                } else {
-                    Toast.makeText(MapActivity.this, "경로 데이터를 불러오는데 실패했습니다", Toast.LENGTH_SHORT).show();
-                    // 실패 시 TMap SDK를 직접 사용하여 경로 가져오기
-                    getDirectRouteTmap(startLat, startLng, endLat, endLng);
-                }
-            }
+    private TMapGpsManager tMapGps;
 
-            @Override
-            public void onFailure(Call<RouteResponse> call, Throwable t) {
-                Toast.makeText(MapActivity.this, "서버 연결 실패: " + t.getMessage(), Toast.LENGTH_SHORT).show();
-                // 실패 시 TMap SDK를 직접 사용하여 경로 가져오기
-                getDirectRouteTmap(startLat, startLng, endLat, endLng);
-            }
-        });
-    }
-
-    private void drawRoute(RouteResponse routeResponse) {
+    private void showMyLocation() {
         try {
-            TMapPolyLine tMapPolyLine = new TMapPolyLine();
-            tMapPolyLine.setLineColor(Color.BLUE);
-            tMapPolyLine.setLineWidth(5);
+            Log.d("Location", "위치 추적 시작");
 
-            List<TMapPoint> points = new ArrayList<>();
+            // 위치 매니저 초기화
+            tMapGps = new TMapGpsManager(this);
 
-            // API 응답에서 좌표 추출
-            for (RouteResponse.Feature feature : routeResponse.getFeatures()) {
-                if (feature.getGeometry() != null && feature.getGeometry().getCoordinates() != null) {
-                    for (List<Double> coordinate : feature.getGeometry().getCoordinates()) {
-                        if (coordinate.size() >= 2) {
-                            double lng = coordinate.get(0);
-                            double lat = coordinate.get(1);
-                            TMapPoint point = new TMapPoint(lat, lng);
-                            points.add(point);
-                        }
-                    }
-                }
-            }
+            // 설정
+            tMapGps.setMinTime(1000);
+            tMapGps.setMinDistance(5);
 
-            for (TMapPoint point : points) {
-                tMapPolyLine.addLinePoint(point);
-            }
+            // 프로바이더 설정 - 둘 다 시도해보세요
+            tMapGps.setProvider(TMapGpsManager.NETWORK_PROVIDER);
+            //tMapGps.setProvider(TMapGpsManager.GPS_PROVIDER);
 
-            // 지도에 경로선 추가
-            tMapView.addTMapPolyLine("walkingRoute", tMapPolyLine);
+            // 콜백 설정
+        /*    boolean callbackResult = tMapGps.setLocationCallback();
+            Log.d("Location", "콜백 설정 결과: " + callbackResult);*/
 
-            // 시작점과 끝점으로 지도 화면 이동
-            if (!points.isEmpty()) {
-                tMapView.setCenterPoint((points.get(0).getLongitude() + points.get(points.size() - 1).getLongitude()) / 2,
-                        (points.get(0).getLatitude() + points.get(points.size() - 1).getLatitude()) / 2);
-            }
+            // GPS 시작
+            tMapGps.OpenGps();
 
+            tMapView.setTrackingMode(true);
+            tMapView.setSightVisible(true);
+
+            Toast.makeText(this, "위치 추적 시작", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            e.printStackTrace();
-            Toast.makeText(this, "경로 그리기 실패: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            Log.e("Location", "위치 추적 오류: " + e.getMessage(), e);
+            Toast.makeText(this, "위치 추적 오류: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
 
-    // 백엔드 API 호출 실패 시 직접 TMap SDK를 통해 경로 요청
-    private void getDirectRouteTmap(double startLat, double startLng, double endLat, double endLng) {
-        TMapPoint startPoint = new TMapPoint(startLat, startLng);
-        TMapPoint endPoint = new TMapPoint(endLat, endLng);
+    @Override
+    public void onLocationChange(Location location) {
+        if (location != null) {
+            double lat = location.getLatitude();
+            double lon = location.getLongitude();
+            Log.d("Location", "위치 업데이트: lat=" + lat + ", lon=" + lon);
 
-        TMapData tMapData = new TMapData();
-
-        tMapData.findPathDataWithType(TMapData.TMapPathType.PEDESTRIAN_PATH, startPoint, endPoint,
-                new TMapData.FindPathDataListenerCallback() {
-                    @Override
-                    public void onFindPathData(TMapPolyLine polyLine) {
-                        runOnUiThread(() -> {
-                            polyLine.setLineColor(Color.RED);
-                            polyLine.setLineWidth(5);
-                            tMapView.addTMapPolyLine("directWalkingRoute", polyLine);
-                        });
-                    }
-                }
-        );
+            // 지도 중심 이동 및 위치 마커 표시
+            tMapView.setCenterPoint(lon, lat);
+            tMapView.setLocationPoint(lon, lat);
+        } else {
+            Log.e("Location", "위치 정보가 null입니다");
+        }
     }
 }
