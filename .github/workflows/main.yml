@@ -11,7 +11,7 @@ env:
   S3_BUCKET_NAME: caps-github-actions-s3-bucket
   CODE_DEPLOY_APPLICATION_NAME: my-codedeploy-app
   CODE_DEPLOY_DEPLOYMENT_GROUP_NAME: my-codedeploy-deployment-group
-  working-directory: C:\capstone
+  working-directory: ./
 
 permissions:
   contents: read
@@ -28,22 +28,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
       
+      # 디버깅을 위해 현재 디렉토리 구조 확인
+      - name: Debug directory structure
+        run: |
+          pwd
+          ls -la
+      
       # 2) JDK 11 셋팅
-      - name: Set up JDK 11
+      - name: Set up JDK 17
         uses: actions/setup-java@v3
         with:
-          java-version: '11'
+          java-version: '17'
           distribution: 'temurin'
       
       # 3) gradlew 권한 설정
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
-        working-directory: ${{ env.working-directory }}
       
       # 4) gradle 빌드
       - name: Build with Gradle
         run: ./gradlew clean build
-        working-directory: ${{ env.working-directory }}
       
       # AWS 인증
       - name: Configure AWS credentials
