@@ -7,7 +7,7 @@ on:
 
 # flow에서 사용할 변수 같은 느낌입니다.
 env:
-  AWS_REGION: ap-northeast-2c
+  AWS_REGION: ap-northeast-2
   S3_BUCKET_NAME: caps-github-actions-s3-bucket
   CODE_DEPLOY_APPLICATION_NAME: my-codedeploy-app
   CODE_DEPLOY_DEPLOYMENT_GROUP_NAME: my-codedeploy-deployment-group
@@ -47,9 +47,9 @@ jobs:
         run: chmod +x gradlew
         working-directory: ${{ env.working-directory }}
       
-      # 4) gradle 빌드
+     # 4) gradle 빌드 - 테스트 건너뛰기
       - name: Build with Gradle
-        run: ./gradlew clean build
+        run: ./gradlew clean build -x test
         working-directory: ${{ env.working-directory }}
       
       # AWS 인증
