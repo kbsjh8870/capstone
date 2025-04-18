@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 PROJECT_ROOT="/home/ubuntu/app"
+cd $PROJECT_ROOT
 BUILD_JAR=$(ls $PROJECT_ROOT/build/libs/*.jar | head -n 1)
 JAR_FILE="$PROJECT_ROOT/capstone.jar"
 
