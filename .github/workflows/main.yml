@@ -51,7 +51,13 @@ jobs:
       - name: Build with Gradle
         run: ./gradlew clean build -x test
         working-directory: ${{ env.working-directory }}
-      
+
+      # scripts 디렉토리 내 파일에 실행 권한 부여
+      - name: Grant execute permission for scripts
+        run: |
+          chmod +x scripts/*.sh
+        working-directory: ${{ env.working-directory }}
+        
       # AWS 인증
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -79,9 +85,4 @@ jobs:
             --deployment-group-name ${{ env.CODE_DEPLOY_DEPLOYMENT_GROUP_NAME }} \
             --s3-location bucket=$S3_BUCKET_NAME,key=$GITHUB_SHA.zip,bundleType=zip
             
-      # scripts 디렉토리 내 파일에 실행 권한 부여
-      - name: Grant execute permission for scripts
-        run: |
-          chmod +x scripts/*.sh
-        working-directory: ${{ env.working-directory }}
-            
+      
