@@ -1,11 +1,9 @@
 name: Java CI with Gradle & Deploy to EC2
 
-# main 브런치에 push가 되면 아래의 flow가 실행됩니다.
 on:
   push:
     branches: [ "main" ]
 
-# flow에서 사용할 변수 같은 느낌입니다.
 env:
   AWS_REGION: ap-northeast-2
   S3_BUCKET_NAME: caps-github-actions-s3-bucket
@@ -21,62 +19,54 @@ jobs:
     name: Deploy
     runs-on: ubuntu-latest
     environment: production
-    
-    # 아래의 flow들이 차례대로 실행됩니다.
+
     steps:
-      # 1) 기본 체크아웃
       - name: Checkout
         uses: actions/checkout@v3
-      
-      # 디버깅을 위해 현재 디렉토리 구조 확인
+
       - name: Debug directory structure
         run: |
           pwd
           ls -la
           ls -la Backend
-      
-      # 2) JDK 11 셋팅
+
       - name: Set up JDK 17
         uses: actions/setup-java@v3
         with:
           java-version: '17'
           distribution: 'temurin'
-      
-      # 3) gradlew 권한 설정
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
         working-directory: ${{ env.working-directory }}
-      
-     # 4) gradle 빌드 - 테스트 건너뛰기
+
       - name: Build with Gradle
         run: ./gradlew clean build -x test
         working-directory: ${{ env.working-directory }}
 
-      # scripts 디렉토리 내 파일에 실행 권한 부여
       - name: Grant execute permission for scripts
         run: |
           chmod +x scripts/*.sh
         working-directory: ${{ env.working-directory }}
-        
-      # AWS 인증
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      
-      # AWS S3에 업로드 - Backend 폴더만 업로드
-      - name: Upload to AWS S3
-        working-directory: ${{ env.working-directory }}
+
+      # ✅ 수정된 부분: Backend 디렉토리를 zip으로 압축
+      - name: Create deployment zip file
         run: |
-          aws deploy push \
-            --application-name ${{ env.CODE_DEPLOY_APPLICATION_NAME }} \
-            --ignore-hidden-files \
-            --s3-location s3://$S3_BUCKET_NAME/$GITHUB_SHA.zip \
-            --source .
-      
-      # AWS EC2에 Deploy
+          cd Backend
+          zip -r ../deploy.zip .
+
+      # ✅ 수정된 부분: 압축된 zip 파일을 S3에 업로드
+      - name: Upload zip to S3
+        run: |
+          aws s3 cp deploy.zip s3://$S3_BUCKET_NAME/$GITHUB_SHA.zip
+
       - name: Deploy to AWS EC2 from S3
         run: |
           aws deploy create-deployment \
@@ -84,5 +74,3 @@ jobs:
             --deployment-config-name CodeDeployDefault.AllAtOnce \
             --deployment-group-name ${{ env.CODE_DEPLOY_DEPLOYMENT_GROUP_NAME }} \
             --s3-location bucket=$S3_BUCKET_NAME,key=$GITHUB_SHA.zip,bundleType=zip
-            
-      
