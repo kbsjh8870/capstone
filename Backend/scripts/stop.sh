@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 PROJECT_ROOT="/home/ubuntu/app"
+cd $PROJECT_ROOT
+
 JAR_FILE="$PROJECT_ROOT/capstone.jar" 
 
 DEPLOY_LOG="$PROJECT_ROOT/deploy.log"
