@@ -11,7 +11,7 @@ public class DeployCheckController {
 
     @GetMapping("/deploy-check")
     public String checkDeploy() {
-        return "배포 확인 9 - 타임스탬프: " +
+        return "배포 확인 10 - 타임스탬프: " +
                 LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
     }
 }
