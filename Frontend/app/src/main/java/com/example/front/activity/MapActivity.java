@@ -3,7 +3,6 @@ package com.example.front.activity;
 import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.location.Location;
 import android.location.LocationManager;
 import android.os.Bundle;
@@ -13,56 +12,97 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
+
 import com.example.front.R;
 import com.skt.Tmap.TMapGpsManager;
-import com.skt.Tmap.TMapPoint;
 import com.skt.Tmap.TMapView;
 
-public class MapActivity extends AppCompatActivity implements TMapGpsManager.onLocationChangedCallback{
-    private TMapView tMapView;
+import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
+public class MapActivity extends AppCompatActivity implements TMapGpsManager.onLocationChangedCallback {
+
     private static final int LOCATION_PERMISSION_REQUEST_CODE = 1000;
+    private TMapView tMapView;
+    private TMapGpsManager tMapGps;
+
+    private RelativeLayout mapLayout;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_map);
 
+        mapLayout = findViewById(R.id.map_layout);
+
+        // 백엔드에서 API 키 받아오기
+        fetchTmapApiKeyFromBackend();
+    }
+
+    private void fetchTmapApiKeyFromBackend() {
+        new Thread(() -> {
+            try {
+                Log.d("TmapAPI", "요청 시작");
+                URL url = new URL("http://43.201.219.2:8080/api/config/tmap-key");
+
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);  // 5초 타임아웃 설정
+                conn.setReadTimeout(5000);
+
+                int responseCode = conn.getResponseCode();
+                Log.d("TmapAPI", "응답 코드: " + responseCode);
+
+                if (responseCode != 200) {
+                    throw new IOException("서버 응답 오류: " + responseCode);
+                }
+
+                InputStream in = new BufferedInputStream(conn.getInputStream());
+                BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+                StringBuilder result = new StringBuilder();
+                String line;
+
+                while ((line = reader.readLine()) != null) {
+                    result.append(line);
+                }
+
+                String apiKey = result.toString().replace("\"", "");
+                Log.d("TmapAPI", "API 키 가져옴: " + apiKey);
+
+                runOnUiThread(() -> initTMapView(apiKey));
+            } catch (Exception e) {
+                Log.e("TmapAPI", "API 키 불러오기 실패: " + e.getMessage(), e);
+                runOnUiThread(() ->
+                        Toast.makeText(MapActivity.this, "API 키 불러오기 실패: " + e.getMessage(), Toast.LENGTH_SHORT).show()
+                );
+            }
+        }).start();
+    }
+
+
+    private void initTMapView(String apiKey) {
         try {
-            // 레이아웃 찾기
-            RelativeLayout mapLayout = findViewById(R.id.map_layout);
-
-            // TMapView 생성
             tMapView = new TMapView(this);
-
-            // API 키 설정
-            String apiKey = "vU7PQGq7eR8bMAnPeg6F285MVcSpXW9W7wNV57JZ";
             tMapView.setSKTMapApiKey(apiKey);
-
-            // 지도 설정
             tMapView.setZoomLevel(15);
-           // tMapView.setCenterPoint(35.148528664420034, 129.0345323654562);
-
-            // 레이아웃에 추가
             mapLayout.addView(tMapView);
 
             checkLocationPermission();
 
             Toast.makeText(this, "TMapView 초기화 성공", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            Toast.makeText(this, "오류: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "TMapView 초기화 오류: " + e.getMessage(), Toast.LENGTH_LONG).show();
             e.printStackTrace();
         }
     }
 
     private void checkLocationPermission() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) !=
-                PackageManager.PERMISSION_GRANTED) {
-
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this,
                     new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
                     LOCATION_PERMISSION_REQUEST_CODE);
         } else {
-            // 위치 권한이 있는 경우 지도 초기화
             initMap();
         }
     }
@@ -82,23 +122,18 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     }
 
     private void initMap() {
-        // 위치 서비스가 활성화되어 있는지 확인
         LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         boolean isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
         boolean isNetworkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
 
         if (!isGpsEnabled && !isNetworkEnabled) {
             Toast.makeText(this, "위치 서비스를 활성화해주세요", Toast.LENGTH_LONG).show();
-            // 위치 설정 화면으로 이동하는 코드 추가 가능
             return;
         }
 
         tMapView.setIconVisibility(true);
         showMyLocation();
     }
-
-
-    private TMapGpsManager tMapGps;
 
     private void showMyLocation() {
         try {
@@ -139,7 +174,6 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             double lon = location.getLongitude();
             Log.d("Location", "위치 업데이트: lat=" + lat + ", lon=" + lon);
 
-            // 지도 중심 이동 및 위치 마커 표시
             tMapView.setCenterPoint(lon, lat);
             tMapView.setLocationPoint(lon, lat);
         } else {

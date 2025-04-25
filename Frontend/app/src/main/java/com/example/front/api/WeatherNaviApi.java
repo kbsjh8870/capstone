@@ -13,4 +13,6 @@ public interface WeatherNaviApi {
             @Query("endLat") double endLat,
             @Query("endLng") double endLng
     );
+
+
 }
