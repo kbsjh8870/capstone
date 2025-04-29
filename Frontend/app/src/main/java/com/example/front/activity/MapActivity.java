@@ -44,7 +44,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         new Thread(() -> {
             try {
                 Log.d("TmapAPI", "요청 시작");
-                URL url = new URL("http://43.201.219.2:8080/api/config/tmap-key");
+                URL url = new URL("http://172.31.43.94:8080/api/config/tmap-key");
 
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
