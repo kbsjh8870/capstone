@@ -409,7 +409,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
             // 보행자 경로 요청
             tMapData.findPathDataWithType(
-                    TMapData.TMapPathType.PEDESTRIAN_PATH,
+                    TMapData.TMapPathType.PEDESTRIAN_PATH, // PEDESTRIAN_PATH -> 보행자 경로 
                     currentLocation,
                     destinationPoint,
                     new TMapData.FindPathDataListenerCallback() {
