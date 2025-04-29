@@ -49,27 +49,21 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     private static final String TAG = "MapActivity";
     private static final int LOCATION_PERMISSION_REQUEST_CODE = 1000;
 
-    // TMap 관련 객체
     private TMapView tMapView;
     private TMapGpsManager tMapGps;
     private TMapData tMapData;
-
-    // UI 요소
     private RelativeLayout mapLayout;
     private EditText etDestination;
     private Button btnSearch;
     private RecyclerView rvSearchResults;
     private ProgressBar progressBar;
     private TextView tvRouteInfo;
-
-    // 데이터 및 상태 변수
     private POIAdapter poiAdapter;
     private TMapPoint currentLocation; // 현재 위치
     private TMapPoint destinationPoint; // 목적지 위치
     private TMapPolyLine currentRoute; // 현재 표시 중인 경로
     private String destinationName; // 목적지 이름
 
-    // 상수
     private static final String SERVER_URL = "http://52.78.249.131:8080";
     private static final int DEFAULT_ZOOM_LEVEL = 15;
     private static final int ROUTE_LINE_COLOR = Color.parseColor("#2196F3"); // 파란색
@@ -465,7 +459,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     }
 
     /**
-     * 위치 변경 콜백 (TMapGpsManager.onLocationChangedCallback 인터페이스 구현)
+     * 위치 변경 콜백 인터페이스 구현
      */
     @Override
     public void onLocationChange(Location location) {
