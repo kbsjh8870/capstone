@@ -1,5 +1,6 @@
 package com.example.Backend.service;
 
+import ch.qos.logback.classic.Logger;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -7,6 +8,9 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
 
 @Service
 public class TmapApiService {
@@ -22,18 +26,33 @@ public class TmapApiService {
     }
 
     public String getWalkingRoute(double startLat, double startLng, double endLat, double endLng) {
-        String url = TMAP_BASE_URL + "/routes/pedestrian?version=1&startX=" + startLng +
-                "&startY=" + startLat + "&endX=" + endLng + "&endY=" + endLat;
+        Logger log = null;
+        try {
+            // 필수 파라미터만 포함
+            String url = TMAP_BASE_URL + "/routes/pedestrian?version=1" +
+                    "&startX=" + startLng +
+                    "&startY=" + startLat +
+                    "&endX=" + endLng +
+                    "&endY=" + endLat +
+                    "&reqCoordType=WGS84GEO" +
+                    "&resCoordType=WGS84GEO";
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Accept", "application/json");
-        headers.set("appKey", tmapApiKey);
+            // 디버깅을 위한 로그 추가
+            log.debug("T맵 API 요청 URL: {}", url);
 
-        HttpEntity<String> entity = new HttpEntity<>(headers);
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("Accept", "application/json");
+            headers.set("appKey", tmapApiKey);
 
-        ResponseEntity<String> response = restTemplate.exchange(
-                url, HttpMethod.GET, entity, String.class);
+            HttpEntity<String> entity = new HttpEntity<>(headers);
 
-        return response.getBody();
+            ResponseEntity<String> response = restTemplate.exchange(
+                    url, HttpMethod.GET, entity, String.class);
+
+            return response.getBody();
+        } catch (Exception e) {
+            log.error("T맵 API 호출 오류:", e);
+            throw new RuntimeException("T맵 API 호출 중 오류 발생", e);
+        }
     }
 }
