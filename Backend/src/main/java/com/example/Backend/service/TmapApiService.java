@@ -1,6 +1,6 @@
 package com.example.Backend.service;
 
-import ch.qos.logback.classic.Logger;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -9,10 +9,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.io.UnsupportedEncodingException;
-import java.net.URLEncoder;
-
 @Service
+@Slf4j
 public class TmapApiService {
 
     @Value("${tmap.api.key}")
@@ -26,7 +24,6 @@ public class TmapApiService {
     }
 
     public String getWalkingRoute(double startLat, double startLng, double endLat, double endLng) {
-        Logger log = null;
         try {
             // 필수 파라미터만 포함
             String url = TMAP_BASE_URL + "/routes/pedestrian?version=1" +
@@ -37,7 +34,6 @@ public class TmapApiService {
                     "&reqCoordType=WGS84GEO" +
                     "&resCoordType=WGS84GEO";
 
-            // 디버깅을 위한 로그 추가
             log.debug("T맵 API 요청 URL: {}", url);
 
             HttpHeaders headers = new HttpHeaders();
