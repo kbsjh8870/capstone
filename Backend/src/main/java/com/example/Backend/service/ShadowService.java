@@ -42,12 +42,12 @@ public class ShadowService {
                 ")" +
                 "SELECT " +
                 "  b.id, " +
-                "  b.A16 as height, " +
+                "  b.\"A16\" as height, " +
                 "  ST_AsGeoJSON(b.geom) as building_geom, " +
-                "  ST_AsGeoJSON(calculate_building_shadow(b.geom, b.A16, ?, ?)) as shadow_geom " +
+                "  ST_AsGeoJSON(calculate_building_shadow(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
                 "FROM public.\"AL_D010_26_20250304\" b, route r " +
                 "WHERE ST_DWithin(b.geom, r.geom, 100) " +
-                "  AND b.A16 > 0";
+                "  AND b.\"A16\" > 0";
 
         List<Map<String, Object>> results = jdbcTemplate.queryForList(
                 sql, routeWkt, sunPos.getAzimuth(), sunPos.getAltitude());
