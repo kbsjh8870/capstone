@@ -55,40 +55,14 @@ public class ShadowRouteService {
             // 2. 태양 위치 계산
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
 
-            // 3. 경로 주변 건물들의 그림자 계산
-            List<RoutePoint> routePoints = basicRoute.getPoints();
-            List<ShadowArea> shadowAreas = new ArrayList<>();
-
-            try {
-                // 데이터베이스에서 건물 정보 조회 - 오류 발생 시 우회
-                shadowAreas = getShadowAreasFromDatabase(routePoints, sunPos);
-            } catch (Exception e) {
-                logger.error("건물 데이터 조회 오류: " + e.getMessage(), e);
-                // 오류 발생 시 빈 그림자 영역 목록 사용
-            }
-
-            // 4. 그림자 정보를 기반으로 대체 경로 계산
-            Route shadowRoute;
-            if (!shadowAreas.isEmpty()) {
-                // 건물 데이터가 있으면 실제 그림자 정보 활용
-                shadowRoute = calculateAlternateRoute(startLat, startLng, endLat, endLng, shadowAreas, avoidShadow);
-            } else {
-                // 건물 데이터가 없으면 시뮬레이션 경로 생성
-                shadowRoute = createEnhancedShadowRoute(basicRoute, sunPos, avoidShadow);
-            }
+            // 3. 도로 네트워크에 맞는 그림자 경로 생성
+            Route shadowRoute = createRoadAlignedShadowRoute(basicRoute, sunPos, avoidShadow);
 
             // 그림자 정보 추가
-            shadowRoute.setShadowAreas(shadowAreas);
             shadowRoute.setAvoidShadow(avoidShadow);
             shadowRoute.setDateTime(dateTime);
             shadowRoute.setBasicRoute(false);
-
-            // 그림자 비율 계산 또는 설정
-            if (!shadowAreas.isEmpty()) {
-                shadowRoute.calculateShadowPercentage(shadowAreas);
-            } else {
-                shadowRoute.setShadowPercentage(avoidShadow ? 15 : 75); // 임의의 그림자 비율
-            }
+            shadowRoute.setShadowPercentage(avoidShadow ? 15 : 75);
 
             routes.add(shadowRoute);
 
@@ -106,6 +80,162 @@ public class ShadowRouteService {
 
             return routes;
         }
+    }
+
+    /**
+     * 도로 네트워크에 정렬된 그림자 경로 생성
+     */
+    private Route createRoadAlignedShadowRoute(Route basicRoute, SunPosition sunPos, boolean avoidShadow) {
+        List<RoutePoint> originalPoints = basicRoute.getPoints();
+        if (originalPoints.size() <= 2) {
+            return basicRoute; // 충분한 포인트가 없으면 기본 경로 반환
+        }
+
+        // 기본 경로의 시작점과 끝점
+        RoutePoint startPoint = originalPoints.get(0);
+        RoutePoint endPoint = originalPoints.get(originalPoints.size() - 1);
+
+        // 중간 지점 선택 (전체 경로의 약 1/3 지점)
+        int midIndex = originalPoints.size() / 3;
+        RoutePoint midPoint = originalPoints.get(midIndex);
+
+        // 태양 위치에 따라 중간 지점 약간 이동 (도로 상에서 가장 가까운 지점을 찾도록 이동 크기를 작게)
+        double angle = Math.toRadians(avoidShadow ? sunPos.getAzimuth() + 90 : sunPos.getAzimuth());
+        double offset = 0.0001 * (avoidShadow ? 1 : -1); // 약 10m 이내로 제한
+
+        double newLat = midPoint.getLat() + offset * Math.sin(angle);
+        double newLng = midPoint.getLng() + offset * Math.cos(angle);
+
+        // T맵 API로 경유지를 포함한 경로 요청
+        try {
+            String wayPointRouteJson = tmapApiService.getWalkingRouteWithWaypoint(
+                    startPoint.getLat(), startPoint.getLng(),
+                    newLat, newLng,
+                    endPoint.getLat(), endPoint.getLng());
+
+            // 새 경로 파싱
+            Route shadowRoute = parseBasicRoute(wayPointRouteJson);
+            shadowRoute.setAvoidShadow(avoidShadow);
+
+            return shadowRoute;
+        } catch (Exception e) {
+            logger.error("경유지 경로 요청 실패: " + e.getMessage(), e);
+            return createMultiPointShadowRoute(basicRoute, sunPos, avoidShadow); // 실패 시 다른 방법 시도
+        }
+    }
+
+    /**
+     * 다중 경유지를 사용한 그림자 경로 생성
+     */
+    private Route createMultiWaypointShadowRoute(Route basicRoute, SunPosition sunPos, boolean avoidShadow) {
+        List<RoutePoint> originalPoints = basicRoute.getPoints();
+        if (originalPoints.size() <= 4) {
+            return createMultiPointShadowRoute(basicRoute, sunPos, avoidShadow);
+        }
+
+        // 시작점과 끝점
+        RoutePoint startPoint = originalPoints.get(0);
+        RoutePoint endPoint = originalPoints.get(originalPoints.size() - 1);
+
+        // 2-3개의 중간 경유지 선택
+        int numWaypoints = 2;
+        double step = originalPoints.size() / (numWaypoints + 1.0);
+
+        List<RoutePoint> waypoints = new ArrayList<>();
+        for (int i = 1; i <= numWaypoints; i++) {
+            int index = (int) (i * step);
+            if (index >= originalPoints.size() - 1) continue;
+
+            RoutePoint origPoint = originalPoints.get(index);
+
+            // 태양 위치에 따른 이동
+            double angle = Math.toRadians(avoidShadow ? sunPos.getAzimuth() + 90 : sunPos.getAzimuth());
+            double offset = 0.0001 * (avoidShadow ? 1 : -1) * Math.sin(Math.PI * i / (numWaypoints + 1));
+
+            double newLat = origPoint.getLat() + offset * Math.sin(angle);
+            double newLng = origPoint.getLng() + offset * Math.cos(angle);
+
+            RoutePoint waypoint = new RoutePoint();
+            waypoint.setLat(newLat);
+            waypoint.setLng(newLng);
+            waypoints.add(waypoint);
+        }
+
+        // T맵 API로 다중 경유지 경로 요청
+        try {
+            String multiWaypointRouteJson = tmapApiService.getWalkingRouteWithMultiWaypoints(
+                    startPoint.getLat(), startPoint.getLng(),
+                    waypoints,
+                    endPoint.getLat(), endPoint.getLng());
+
+            Route shadowRoute = parseBasicRoute(multiWaypointRouteJson);
+            shadowRoute.setAvoidShadow(avoidShadow);
+
+            return shadowRoute;
+        } catch (Exception e) {
+            logger.error("다중 경유지 경로 요청 실패: " + e.getMessage(), e);
+            return createMultiPointShadowRoute(basicRoute, sunPos, avoidShadow);
+        }
+    }
+
+    /**
+     * 포인트 추가 방식의 그림자 경로 생성 (API 요청 실패 시 백업 메서드)
+     */
+    private Route createMultiPointShadowRoute(Route basicRoute, SunPosition sunPos, boolean avoidShadow) {
+        Route shadowRoute = new Route();
+        List<RoutePoint> modifiedPoints = new ArrayList<>();
+
+        List<RoutePoint> originalPoints = basicRoute.getPoints();
+        if (originalPoints.size() <= 1) {
+            return basicRoute; // 충분한 포인트가 없으면 기본 경로 반환
+        }
+
+        // 기본 경로의 시작점과 끝점
+        RoutePoint startPoint = originalPoints.get(0);
+        RoutePoint endPoint = originalPoints.get(originalPoints.size() - 1);
+
+        // 시작점 추가
+        RoutePoint startPointCopy = new RoutePoint();
+        startPointCopy.setLat(startPoint.getLat());
+        startPointCopy.setLng(startPoint.getLng());
+        modifiedPoints.add(startPointCopy);
+
+        // 기존 경로 포인트 복사 및 소폭 조정
+        for (int i = 1; i < originalPoints.size() - 1; i++) {
+            RoutePoint orig = originalPoints.get(i);
+
+            // 태양 위치에 따라 포인트 조금씩 이동
+            double angle = Math.toRadians(avoidShadow ? sunPos.getAzimuth() + 90 : sunPos.getAzimuth());
+
+            // 경로 중간 부분에서 가장 큰 편차(그림자 효과) 적용
+            double factor = Math.sin(Math.PI * i / originalPoints.size());
+            double offset = 0.00005 * (avoidShadow ? 1 : -1) * factor; // 매우 작은 오프셋 (~5m)
+
+            double newLat = orig.getLat() + offset * Math.sin(angle);
+            double newLng = orig.getLng() + offset * Math.cos(angle);
+
+            RoutePoint modified = new RoutePoint();
+            modified.setLat(newLat);
+            modified.setLng(newLng);
+            modified.setInShadow(!avoidShadow);
+
+            modifiedPoints.add(modified);
+        }
+
+        // 끝점 추가
+        RoutePoint endPointCopy = new RoutePoint();
+        endPointCopy.setLat(endPoint.getLat());
+        endPointCopy.setLng(endPoint.getLng());
+        modifiedPoints.add(endPointCopy);
+
+        shadowRoute.setPoints(modifiedPoints);
+
+        // 거리 및 소요 시간 계산
+        double distance = calculateRouteDistance(modifiedPoints);
+        shadowRoute.setDistance(distance);
+        shadowRoute.setDuration((int) (distance / 67)); // 평균 보행 속도 (약 4km/h)
+
+        return shadowRoute;
     }
 
     /**
@@ -132,12 +262,12 @@ public class ShadowRouteService {
                     ")" +
                     "SELECT " +
                     "  b.id, " +
-                    "  b.\"A16\" as height, " +  // 큰따옴표로 컬럼 이름 감싸기
+                    "  b.\"A16\" as height, " +
                     "  ST_AsGeoJSON(b.geom) as building_geom, " +
-                    "  ST_AsGeoJSON(calculate_building_shadow(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +  // 큰따옴표 사용
-                    "FROM public.\"AL_D010_26_20250304\" b, route r " +  // 테이블 이름 큰따옴표로 감싸기
-                    "WHERE ST_DWithin(b.geom, r.geom, 100) " +  // 경로 100m 이내 건물
-                    "  AND b.\"A16\" > 0";  // 높이가 있는 건물만
+                    "  ST_AsGeoJSON(calculate_building_shadow(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
+                    "FROM public.\"AL_D010_26_20250304\" b, route r " +
+                    "WHERE ST_DWithin(b.geom, r.geom, 100) " +
+                    "  AND b.\"A16\" > 0";
 
             List<Map<String, Object>> results = jdbcTemplate.queryForList(
                     sql, routeWkt, sunPos.getAzimuth(), sunPos.getAltitude());
@@ -177,199 +307,6 @@ public class ShadowRouteService {
             }
         }
         sb.append(")");
-        return sb.toString();
-    }
-
-    /**
-     * 그림자 영역을 고려한 대체 경로 계산
-     */
-    private Route calculateAlternateRoute(
-            double startLat, double startLng,
-            double endLat, double endLng,
-            List<ShadowArea> shadowAreas,
-            boolean avoidShadow) {
-
-        try {
-            // 출발점과 도착점 생성
-            String startPoint = String.format("POINT(%f %f)", startLng, startLat);
-            String endPoint = String.format("POINT(%f %f)", endLng, endLat);
-
-            // 그림자 영역들을 하나의 Geometry로 병합
-            String shadowUnion = createShadowUnion(shadowAreas);
-
-            // 빈 그림자 영역 처리
-            if (shadowUnion.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}") || shadowAreas.isEmpty()) {
-                // 그림자 영역이 없으면 기본 경로 반환
-                return createSimplePath(startLat, startLng, endLat, endLng);
-            }
-
-            try {
-                // 함수 존재 여부 확인
-                String checkFunctionSql = "SELECT EXISTS (SELECT FROM pg_proc WHERE proname = 'calculate_shadow_aware_route')";
-                boolean functionExists = jdbcTemplate.queryForObject(checkFunctionSql, Boolean.class);
-
-                if (!functionExists) {
-                    logger.warn("calculate_shadow_aware_route 함수가 존재하지 않습니다.");
-                    return createSimplePath(startLat, startLng, endLat, endLng);
-                }
-
-                // SQL을 사용하여 대체 경로 계산
-                String sql = "SELECT ST_AsGeoJSON(calculate_shadow_aware_route(" +
-                        "ST_GeomFromText(?, 4326), " +  // 시작점
-                        "ST_GeomFromText(?, 4326), " +  // 도착점
-                        "ST_GeomFromGeoJSON(?), " +    // 병합된 그림자 영역
-                        "?)) AS route_geom";           // 그림자 회피 여부
-
-                String routeGeoJson = jdbcTemplate.queryForObject(
-                        sql, String.class, startPoint, endPoint, shadowUnion, avoidShadow);
-
-                // GeoJSON을 경로 객체로 변환
-                Route route = parseRouteFromGeoJson(routeGeoJson, avoidShadow);
-                return route;
-            } catch (Exception e) {
-                logger.error("대체 경로 계산 실패: " + e.getMessage(), e);
-                // 오류 발생 시 시뮬레이션 경로 생성
-                Route basicRoute = createSimplePath(startLat, startLng, endLat, endLng);
-                List<RoutePoint> basicPoints = basicRoute.getPoints();
-
-                if (basicPoints.size() >= 2) {
-                    SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, LocalDateTime.now());
-                    Route enhancedRoute = createEnhancedShadowRoute(basicRoute, sunPos, avoidShadow);
-                    return enhancedRoute;
-                } else {
-                    return basicRoute;
-                }
-            }
-        } catch (Exception e) {
-            logger.error("대체 경로 처리 오류: " + e.getMessage(), e);
-            return createSimplePath(startLat, startLng, endLat, endLng);
-        }
-    }
-
-    /**
-     * 개선된 그림자 경로 생성 메서드 - 데이터베이스 대신 시뮬레이션 사용
-     */
-    private Route createEnhancedShadowRoute(Route basicRoute, SunPosition sunPos, boolean avoidShadow) {
-        Route shadowRoute = new Route();
-        List<RoutePoint> modifiedPoints = new ArrayList<>();
-
-        List<RoutePoint> originalPoints = basicRoute.getPoints();
-        if (originalPoints.size() <= 1) {
-            return basicRoute; // 충분한 포인트가 없으면 기본 경로 반환
-        }
-
-        // 기본 경로의 시작점과 끝점
-        RoutePoint startPoint = originalPoints.get(0);
-        RoutePoint endPoint = originalPoints.get(originalPoints.size() - 1);
-
-        // 시작점 추가
-        RoutePoint startPointCopy = new RoutePoint();
-        startPointCopy.setLat(startPoint.getLat());
-        startPointCopy.setLng(startPoint.getLng());
-        modifiedPoints.add(startPointCopy);
-
-        // 중간 지점 생성
-        if (originalPoints.size() >= 3) {
-            // 기존 경로에서 중간 지점들을 활용 - 일부 포인트만 활용하여 경로 단순화
-            int step = Math.max(1, originalPoints.size() / 5); // 포인트 수 제한
-
-            for (int i = step; i < originalPoints.size() - 1; i += step) {
-                RoutePoint orig = originalPoints.get(i);
-
-                // 태양 위치에 따라 포인트 이동
-                double angle = Math.toRadians(avoidShadow ? sunPos.getAzimuth() + 90 : sunPos.getAzimuth());
-                double offset = 0.0002 * (avoidShadow ? 1 : -1); // 약 20-30m
-
-                // 경로의 중간 부분에서 더 큰 편차 적용
-                double factor = Math.sin(Math.PI * i / originalPoints.size());
-                offset *= factor;
-
-                double newLat = orig.getLat() + offset * Math.sin(angle);
-                double newLng = orig.getLng() + offset * Math.cos(angle);
-
-                RoutePoint modified = new RoutePoint();
-                modified.setLat(newLat);
-                modified.setLng(newLng);
-                modified.setInShadow(!avoidShadow);
-
-                modifiedPoints.add(modified);
-            }
-        } else {
-            // 중간 지점이 없는 경우, 새로운 중간 지점 생성
-            double midLat = (startPoint.getLat() + endPoint.getLat()) / 2;
-            double midLng = (startPoint.getLng() + endPoint.getLng()) / 2;
-
-            // 태양 위치에 따라 중간 지점 이동
-            double angle = Math.toRadians(avoidShadow ? sunPos.getAzimuth() + 90 : sunPos.getAzimuth());
-            double offset = 0.0003 * (avoidShadow ? 1 : -1); // 약 30-50m
-
-            midLat += offset * Math.sin(angle);
-            midLng += offset * Math.cos(angle);
-
-            RoutePoint midPoint = new RoutePoint();
-            midPoint.setLat(midLat);
-            midPoint.setLng(midLng);
-            midPoint.setInShadow(!avoidShadow);
-
-            modifiedPoints.add(midPoint);
-        }
-
-        // 끝점 추가
-        RoutePoint endPointCopy = new RoutePoint();
-        endPointCopy.setLat(endPoint.getLat());
-        endPointCopy.setLng(endPoint.getLng());
-        modifiedPoints.add(endPointCopy);
-
-        shadowRoute.setPoints(modifiedPoints);
-
-        // 거리 및 소요 시간 계산
-        double distance = 0;
-        for (int i = 0; i < modifiedPoints.size() - 1; i++) {
-            RoutePoint p1 = modifiedPoints.get(i);
-            RoutePoint p2 = modifiedPoints.get(i + 1);
-            distance += calculateDistance(p1.getLat(), p1.getLng(), p2.getLat(), p2.getLng());
-        }
-
-        shadowRoute.setDistance(distance);
-        shadowRoute.setDuration((int) (distance / 67)); // 평균 보행 속도
-
-        return shadowRoute;
-    }
-
-    /**
-     * 그림자 영역들을 하나의 GeoJSON으로 병합
-     */
-    private String createShadowUnion(List<ShadowArea> shadowAreas) {
-        if (shadowAreas == null || shadowAreas.isEmpty()) {
-            // 유효한 빈 GeoJSON
-            return "{\"type\":\"GeometryCollection\",\"geometries\":[]}";
-        }
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("{\"type\":\"GeometryCollection\",\"geometries\":[");
-
-        boolean hasValidGeometry = false;
-        for (int i = 0; i < shadowAreas.size(); i++) {
-            ShadowArea area = shadowAreas.get(i);
-            String shadowGeom = area.getShadowGeometry();
-
-            // null이 아니고 유효한 GeoJSON인지 확인
-            if (shadowGeom != null && !shadowGeom.isEmpty() && !shadowGeom.equals("null")) {
-                if (hasValidGeometry) {
-                    sb.append(",");
-                }
-                sb.append(shadowGeom);
-                hasValidGeometry = true;
-            }
-        }
-
-        sb.append("]}");
-
-        // 유효한 지오메트리가 없으면 빈 컬렉션 반환
-        if (!hasValidGeometry) {
-            return "{\"type\":\"GeometryCollection\",\"geometries\":[]}";
-        }
-
         return sb.toString();
     }
 
@@ -432,51 +369,16 @@ public class ShadowRouteService {
     }
 
     /**
-     * GeoJSON에서 경로 객체 생성
+     * 경로 거리 계산
      */
-    private Route parseRouteFromGeoJson(String geoJson, boolean avoidShadow) {
-        Route route = new Route();
-        List<RoutePoint> points = new ArrayList<>();
-
-        try {
-            JsonNode rootNode = objectMapper.readTree(geoJson);
-
-            if (rootNode.has("type") && rootNode.path("type").asText().equals("LineString")) {
-                JsonNode coordinates = rootNode.path("coordinates");
-
-                for (JsonNode coord : coordinates) {
-                    double lng = coord.get(0).asDouble();
-                    double lat = coord.get(1).asDouble();
-
-                    RoutePoint point = new RoutePoint();
-                    point.setLat(lat);
-                    point.setLng(lng);
-                    points.add(point);
-                }
-            }
-
-            route.setPoints(points);
-
-            // 경로 거리 계산
-            double distance = 0;
-            for (int i = 0; i < points.size() - 1; i++) {
-                RoutePoint p1 = points.get(i);
-                RoutePoint p2 = points.get(i + 1);
-                distance += calculateDistance(p1.getLat(), p1.getLng(), p2.getLat(), p2.getLng());
-            }
-
-            route.setDistance(distance);
-            route.setDuration((int) (distance / 67)); // 평균 보행 속도 4km/h (약 67m/분)
-            route.setAvoidShadow(avoidShadow);
-
-        } catch (Exception e) {
-            logger.error("GeoJSON 파싱 오류: " + e.getMessage(), e);
-            route.setPoints(new ArrayList<>());
-            route.setDistance(0);
-            route.setDuration(0);
+    private double calculateRouteDistance(List<RoutePoint> points) {
+        double distance = 0;
+        for (int i = 0; i < points.size() - 1; i++) {
+            RoutePoint p1 = points.get(i);
+            RoutePoint p2 = points.get(i + 1);
+            distance += calculateDistance(p1.getLat(), p1.getLng(), p2.getLat(), p2.getLng());
         }
-
-        return route;
+        return distance;
     }
 
     /**
