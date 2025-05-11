@@ -1,6 +1,8 @@
 package com.example.front.activity;
 
 import android.Manifest;
+import android.app.DatePickerDialog;
+import android.app.TimePickerDialog;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -12,12 +14,7 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.ProgressBar;
-import android.widget.RelativeLayout;
-import android.widget.TextView;
-import android.widget.Toast;
+import android.widget.*;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -27,13 +24,11 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.example.front.R;
 import com.example.front.adapter.POIAdapter;
-import com.skt.Tmap.TMapData;
-import com.skt.Tmap.TMapGpsManager;
-import com.skt.Tmap.TMapMarkerItem;
+import com.skt.Tmap.*;
 import com.skt.Tmap.poi_item.TMapPOIItem;
-import com.skt.Tmap.TMapPoint;
-import com.skt.Tmap.TMapPolyLine;
-import com.skt.Tmap.TMapView;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
@@ -42,7 +37,13 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class MapActivity extends AppCompatActivity implements TMapGpsManager.onLocationChangedCallback {
 
@@ -69,6 +70,12 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     private static final int ROUTE_LINE_COLOR = Color.parseColor("#2196F3"); // 파란색
     private static final float ROUTE_LINE_WIDTH = 5.0f;
 
+    private List<TMapPolyLine> routes = new ArrayList<>();
+    private Map<String, TMapPolygon> buildingPolygons = new HashMap<>();
+    private Map<String, TMapPolygon> shadowPolygons = new HashMap<>();
+    private LocalDateTime selectedDateTime = LocalDateTime.now();
+    private boolean avoidShadow = true;  // 기본값: 그림자 회피
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -76,6 +83,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
         initViews();
         setupListeners();
+        setupShadowSettingsUI(); // 그림자 설정 UI 초기화
         fetchTmapApiKeyFromBackend();
     }
 
@@ -495,6 +503,489 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         // 리소스 해제
         if (tMapGps != null) {
             tMapGps.CloseGps();
+        }
+    }
+
+    /**
+     * 그림자 정보를 고려한 경로 요청
+     */
+    private void requestShadowRoutes() {
+        if (currentLocation == null || destinationPoint == null) {
+            Log.e(TAG, "경로 요청 불가: 현재 위치 또는 목적지가 없습니다");
+            return;
+        }
+
+        progressBar.setVisibility(View.VISIBLE);
+        tvRouteInfo.setVisibility(View.GONE);
+
+        // 기존에 표시된 경로와 그림자 영역 제거
+        clearMapOverlays();
+
+        // 그림자 경로 API 호출
+        new Thread(() -> {
+            try {
+                // API 호출 URL 구성
+                String url = String.format(
+                        "%s/api/routes/shadow?startLat=%f&startLng=%f&endLat=%f&endLng=%f&avoidShadow=%b&dateTime=%s",
+                        SERVER_URL,
+                        currentLocation.getLatitude(),
+                        currentLocation.getLongitude(),
+                        destinationPoint.getLatitude(),
+                        destinationPoint.getLongitude(),
+                        avoidShadow,
+                        URLEncoder.encode(selectedDateTime.toString(), "UTF-8"));
+
+                Log.d(TAG, "그림자 경로 요청: " + url);
+
+                HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+
+                int responseCode = conn.getResponseCode();
+                if (responseCode != 200) {
+                    throw new IOException("서버 응답 오류: " + responseCode);
+                }
+
+                // 응답 파싱
+                InputStream in = new BufferedInputStream(conn.getInputStream());
+                BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+                StringBuilder response = new StringBuilder();
+                String line;
+
+                while ((line = reader.readLine()) != null) {
+                    response.append(line);
+                }
+
+                JSONArray routesArray = new JSONArray(response.toString());
+
+                // UI 업데이트는 메인 스레드에서 수행
+                runOnUiThread(() -> {
+                    progressBar.setVisibility(View.GONE);
+
+                    try {
+                        displayShadowRoutes(routesArray);
+                    } catch (Exception e) {
+                        Log.e(TAG, "경로 표시 오류: " + e.getMessage(), e);
+                        Toast.makeText(MapActivity.this,
+                                "경로 표시 중 오류가 발생했습니다: " + e.getMessage(),
+                                Toast.LENGTH_SHORT).show();
+
+                        // 오류 발생 시 기본 경로만 표시
+                        findPathWithTmapAPI();
+                    }
+                });
+
+            } catch (Exception e) {
+                Log.e(TAG, "그림자 경로 요청 오류: " + e.getMessage(), e);
+                runOnUiThread(() -> {
+                    progressBar.setVisibility(View.GONE);
+                    Toast.makeText(MapActivity.this,
+                            "그림자 경로 요청 중 오류가 발생했습니다: " + e.getMessage(),
+                            Toast.LENGTH_SHORT).show();
+
+                    // 오류 발생 시 기본 경로만 표시
+                    findPathWithTmapAPI();
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * 지도에 표시된 경로와 그림자 영역 제거
+     */
+    private void clearMapOverlays() {
+        // 경로 제거
+        for (TMapPolyLine route : routes) {
+            tMapView.removeTMapPolyLine(route.getID());
+        }
+        routes.clear();
+
+        // 건물 폴리곤 제거
+        for (String key : buildingPolygons.keySet()) {
+            tMapView.removeTMapPolygon(key);
+        }
+        buildingPolygons.clear();
+
+        // 그림자 폴리곤 제거
+        for (String key : shadowPolygons.keySet()) {
+            tMapView.removeTMapPolygon(key);
+        }
+        shadowPolygons.clear();
+
+        // 현재 경로 참조 제거
+        currentRoute = null;
+    }
+
+    /**
+     * 그림자 경로 표시
+     */
+    private void displayShadowRoutes(JSONArray routesArray) throws JSONException {
+        if (routesArray.length() == 0) {
+            Toast.makeText(this, "경로를 찾을 수 없습니다", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // 모든 경로의 좌표점을 저장할 리스트
+        List<TMapPoint> allPoints = new ArrayList<>();
+
+        // 각 경로 처리
+        for (int r = 0; r < routesArray.length(); r++) {
+            JSONObject routeObj = routesArray.getJSONObject(r);
+
+            // 경로 정보 추출
+            boolean isBasicRoute = routeObj.getBoolean("basicRoute");
+            JSONArray pointsArray = routeObj.getJSONArray("points");
+            double distance = routeObj.getDouble("distance");
+            int duration = routeObj.getInt("duration");
+
+            // 경로 생성
+            TMapPolyLine polyLine = new TMapPolyLine();
+            polyLine.setID("route_" + r);
+
+            // 경로 스타일 설정 (기본 경로와 그림자 경로 구분)
+            if (isBasicRoute) {
+                polyLine.setLineColor(Color.parseColor("#2196F3")); // 파란색
+                polyLine.setLineWidth(5.0f);
+            } else {
+                // 그림자 경로는 다른 색상으로 표시
+                polyLine.setLineColor(Color.parseColor("#FF5722")); // 주황색
+                polyLine.setLineWidth(5.0f);
+
+                // 추가 정보 표시
+                boolean routeAvoidShadow = routeObj.getBoolean("avoidShadow");
+                int shadowPercentage = routeObj.getInt("shadowPercentage");
+
+                // 그림자 정보 텍스트 업데이트
+                String shadowTypeText = routeAvoidShadow ? "그림자 회피" : "그림자 따라가기";
+                String routeInfo = String.format(
+                        "기본 경로: %.1f km | %d분 | %s 경로: %.1f km | %d분 (%d%% 그림자)",
+                        routes.get(0).getDistance() / 1000.0,
+                        (int)(routes.get(0).getDistance() / 67.0),
+                        shadowTypeText,
+                        distance / 1000.0,
+                        duration,
+                        shadowPercentage);
+                tvRouteInfo.setText(routeInfo);
+                tvRouteInfo.setVisibility(View.VISIBLE);
+
+                // 그림자 영역 표시
+                if (routeObj.has("shadowAreas")) {
+                    displayShadowAreas(routeObj.getJSONArray("shadowAreas"));
+                }
+            }
+
+            // 경로 좌표 추가
+            for (int i = 0; i < pointsArray.length(); i++) {
+                JSONObject point = pointsArray.getJSONObject(i);
+                double lat = point.getDouble("lat");
+                double lng = point.getDouble("lng");
+                boolean inShadow = point.optBoolean("inShadow", false);
+
+                TMapPoint tMapPoint = new TMapPoint(lat, lng);
+                polyLine.addLinePoint(tMapPoint);
+                allPoints.add(tMapPoint);
+            }
+
+            // 경로 지도에 추가
+            tMapView.addTMapPolyLine(polyLine.getID(), polyLine);
+            routes.add(polyLine);
+
+            // 첫 번째 경로(기본 경로)를 현재 경로로 설정
+            if (r == 0) {
+                currentRoute = polyLine;
+            }
+        }
+
+        // 모든 경로가 화면에 표시되도록 확대/축소 레벨 조정
+        if (!allPoints.isEmpty()) {
+            // 위도, 경도의 최소/최대값 계산
+            double minLat = Double.MAX_VALUE, maxLat = Double.MIN_VALUE;
+            double minLng = Double.MAX_VALUE, maxLng = Double.MIN_VALUE;
+
+            for (TMapPoint point : allPoints) {
+                minLat = Math.min(minLat, point.getLatitude());
+                maxLat = Math.max(maxLat, point.getLatitude());
+                minLng = Math.min(minLng, point.getLongitude());
+                maxLng = Math.max(maxLng, point.getLongitude());
+            }
+
+            // 위도 및 경도 범위 계산
+            double latSpan = maxLat - minLat;
+            double lonSpan = maxLng - minLng;
+
+            // 지도 중심점 설정 (모든 포인트의 중앙)
+            double centerLat = (minLat + maxLat) / 2;
+            double centerLng = (minLng + maxLng) / 2;
+            tMapView.setCenterPoint(centerLng, centerLat);
+
+            // 줌 범위 설정 (약간의 여백 추가)
+            tMapView.zoomToSpan(latSpan * 1.2, lonSpan * 1.2);
+        }
+
+        // 경로 선택 버튼 표시
+        showRouteSelectionButtons();
+    }
+
+    /**
+     * 경로 선택 버튼 표시
+     */
+    private void showRouteSelectionButtons() {
+        // 경로 선택 버튼 컨테이너 표시
+        LinearLayout routeButtonContainer = findViewById(R.id.route_button_container);
+        routeButtonContainer.setVisibility(View.VISIBLE);
+        routeButtonContainer.removeAllViews();
+
+        // 기본 경로 버튼
+        Button basicRouteButton = new Button(this);
+        basicRouteButton.setText("기본 경로");
+        basicRouteButton.setOnClickListener(v -> {
+            // 기본 경로 선택
+            setActiveRoute(0);
+        });
+        routeButtonContainer.addView(basicRouteButton);
+
+        // 그림자 경로 버튼
+        if (routes.size() > 1) {
+            Button shadowRouteButton = new Button(this);
+            shadowRouteButton.setText(avoidShadow ? "그림자 회피 경로" : "그림자 따라가기 경로");
+            shadowRouteButton.setOnClickListener(v -> {
+                // 그림자 경로 선택
+                setActiveRoute(1);
+            });
+            routeButtonContainer.addView(shadowRouteButton);
+        }
+    }
+
+    /**
+     * 활성 경로 설정
+     */
+    private void setActiveRoute(int routeIndex) {
+        if (routeIndex < 0 || routeIndex >= routes.size()) {
+            return;
+        }
+
+        // 모든 경로 스타일 초기화
+        for (int i = 0; i < routes.size(); i++) {
+            TMapPolyLine route = routes.get(i);
+            if (i == 0) {
+                // 기본 경로
+                route.setLineColor(Color.parseColor("#2196F3")); // 파란색
+            } else {
+                // 그림자 경로
+                route.setLineColor(Color.parseColor("#FF5722")); // 주황색
+            }
+            route.setLineWidth(5.0f);
+            tMapView.removeTMapPolyLine(route.getID());
+            tMapView.addTMapPolyLine(route.getID(), route);
+        }
+
+        // 선택된 경로 강조
+        TMapPolyLine selectedRoute = routes.get(routeIndex);
+        selectedRoute.setLineWidth(8.0f);
+        tMapView.removeTMapPolyLine(selectedRoute.getID());
+        tMapView.addTMapPolyLine(selectedRoute.getID(), selectedRoute);
+
+        // 현재 경로 업데이트
+        currentRoute = selectedRoute;
+
+        // 선택된 경로가 그림자 경로인 경우, 그림자 영역 표시/숨김
+        boolean isShowingShadowRoute = (routeIndex > 0);
+        for (String key : shadowPolygons.keySet()) {
+            TMapPolygon polygon = shadowPolygons.get(key);
+            polygon.setAreaColor(Color.argb(
+                    isShowingShadowRoute ? 80 : 40, 0, 0, 0)); // 그림자 투명도 조정
+            tMapView.removeTMapPolygon(key);
+            tMapView.addTMapPolygon(key, polygon);
+        }
+    }
+
+    /**
+     * 그림자 영역 표시
+     */
+    private void displayShadowAreas(JSONArray shadowAreasArray) throws JSONException {
+        for (int i = 0; i < shadowAreasArray.length(); i++) {
+            JSONObject shadowArea = shadowAreasArray.getJSONObject(i);
+            long id = shadowArea.getLong("id");
+
+            // 건물 영역 표시
+            if (shadowArea.has("buildingGeometry")) {
+                displayPolygonFromGeoJson(
+                        shadowArea.getString("buildingGeometry"),
+                        "building_" + id,
+                        Color.argb(50, 100, 100, 100), // 반투명 회색
+                        buildingPolygons);
+            }
+
+            // 그림자 영역 표시
+            if (shadowArea.has("shadowGeometry")) {
+                displayPolygonFromGeoJson(
+                        shadowArea.getString("shadowGeometry"),
+                        "shadow_" + id,
+                        Color.argb(40, 0, 0, 0), // 반투명 검은색
+                        shadowPolygons);
+            }
+        }
+    }
+
+    /**
+     * GeoJSON 형식의 폴리곤을 지도에 표시
+     */
+    private void displayPolygonFromGeoJson(
+            String geoJson,
+            String id,
+            int color,
+            Map<String, TMapPolygon> polygonMap) {
+
+        try {
+            JSONObject jsonObject = new JSONObject(geoJson);
+            if (!"Polygon".equals(jsonObject.getString("type")) &&
+                    !"MultiPolygon".equals(jsonObject.getString("type"))) {
+                return; // Polygon 또는 MultiPolygon만 처리
+            }
+
+            JSONArray coordinates;
+            if ("Polygon".equals(jsonObject.getString("type"))) {
+                coordinates = jsonObject.getJSONArray("coordinates");
+                addPolygonToMap(coordinates.getJSONArray(0), id, color, polygonMap);
+            } else { // MultiPolygon
+                coordinates = jsonObject.getJSONArray("coordinates");
+                for (int i = 0; i < coordinates.length(); i++) {
+                    JSONArray polygonCoords = coordinates.getJSONArray(i);
+                    addPolygonToMap(polygonCoords.getJSONArray(0), id + "_" + i, color, polygonMap);
+                }
+            }
+        } catch (JSONException e) {
+            Log.e(TAG, "GeoJSON 파싱 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 좌표 배열로부터 폴리곤 생성 및 지도에 추가
+     */
+    private void addPolygonToMap(
+            JSONArray pointsArray,
+            String id,
+            int color,
+            Map<String, TMapPolygon> polygonMap) throws JSONException {
+
+        TMapPolygon polygon = new TMapPolygon();
+        polygon.setID(id);
+        polygon.setLineColor(Color.TRANSPARENT); // 테두리 없음
+        polygon.setAreaColor(color);
+
+        for (int i = 0; i < pointsArray.length(); i++) {
+            JSONArray point = pointsArray.getJSONArray(i);
+            double lng = point.getDouble(0); // GeoJSON은 [경도, 위도] 순서
+            double lat = point.getDouble(1);
+            polygon.addPolygonPoint(new TMapPoint(lat, lng));
+        }
+
+        tMapView.addTMapPolygon(id, polygon);
+        polygonMap.put(id, polygon);
+    }
+
+    /**
+     * 그림자 설정 UI 구성
+     */
+    private void setupShadowSettingsUI() {
+        try {
+            // 그림자 설정 패널 찾기
+            LinearLayout shadowSettingsPanel = findViewById(R.id.shadow_settings_panel);
+
+            // 날짜/시간 선택 버튼
+            Button btnSelectTime = findViewById(R.id.btn_select_time);
+            TextView tvSelectedTime = findViewById(R.id.tv_selected_time);
+
+            // 현재 날짜/시간으로 초기화
+            updateTimeDisplay(tvSelectedTime, selectedDateTime);
+
+            // 그림자 옵션 라디오 버튼
+            RadioButton radioAvoidShadow = findViewById(R.id.radio_avoid_shadow);
+            RadioButton radioFollowShadow = findViewById(R.id.radio_follow_shadow);
+
+            // 날짜/시간 선택 버튼 이벤트
+            btnSelectTime.setOnClickListener(v -> {
+                showDateTimePickerDialog(selectedDateTime, newDateTime -> {
+                    selectedDateTime = newDateTime;
+                    updateTimeDisplay(tvSelectedTime, selectedDateTime);
+
+                    // 경로가 설정된 상태라면 재계산
+                    if (currentLocation != null && destinationPoint != null) {
+                        requestShadowRoutes();
+                    }
+                });
+            });
+
+            // 그림자 옵션 변경 이벤트
+            RadioGroup shadowOptions = findViewById(R.id.radio_group_shadow);
+            shadowOptions.setOnCheckedChangeListener((group, checkedId) -> {
+                avoidShadow = (checkedId == R.id.radio_avoid_shadow);
+
+                // 경로가 설정된 상태라면 재계산
+                if (currentLocation != null && destinationPoint != null) {
+                    requestShadowRoutes();
+                }
+            });
+
+            // 그림자 설정 패널 토글 버튼
+            Button btnToggleShadowSettings = findViewById(R.id.btn_toggle_shadow_settings);
+            btnToggleShadowSettings.setOnClickListener(v -> {
+                boolean isVisible = shadowSettingsPanel.getVisibility() == View.VISIBLE;
+                shadowSettingsPanel.setVisibility(isVisible ? View.GONE : View.VISIBLE);
+                btnToggleShadowSettings.setText(isVisible ? "그림자 설정 표시" : "그림자 설정 숨기기");
+            });
+        } catch (Exception e) {
+            Log.e(TAG, "그림자 설정 UI 초기화 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 날짜/시간 선택 다이얼로그 표시
+     */
+    private void showDateTimePickerDialog(LocalDateTime initialDateTime,
+                                          DateTimeSelectedListener listener) {
+        // 날짜 선택 다이얼로그
+        DatePickerDialog dateDialog = new DatePickerDialog(
+                this,
+                (view, year, month, dayOfMonth) -> {
+                    // 시간 선택 다이얼로그
+                    TimePickerDialog timeDialog = new TimePickerDialog(
+                            this,
+                            (view2, hourOfDay, minute) -> {
+                                LocalDateTime selected = LocalDateTime.of(
+                                        year, month + 1, dayOfMonth, hourOfDay, minute);
+                                listener.onDateTimeSelected(selected);
+                            },
+                            initialDateTime.getHour(),
+                            initialDateTime.getMinute(),
+                            true
+                    );
+                    timeDialog.show();
+                },
+                initialDateTime.getYear(),
+                initialDateTime.getMonthValue() - 1,
+                initialDateTime.getDayOfMonth()
+        );
+        dateDialog.show();
+    }
+
+    /**
+     * 날짜/시간 선택 리스너 인터페이스
+     */
+    interface DateTimeSelectedListener {
+        void onDateTimeSelected(LocalDateTime dateTime);
+    }
+
+    /**
+     * 날짜/시간 표시 업데이트
+     */
+    private void updateTimeDisplay(TextView textView, LocalDateTime dateTime) {
+        try {
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+            textView.setText(dateTime.format(formatter));
+        } catch (Exception e) {
+            Log.e(TAG, "날짜/시간 표시 오류: " + e.getMessage(), e);
         }
     }
 }

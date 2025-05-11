@@ -32,6 +32,81 @@
                 android:layout_marginStart="8dp"
                 android:text="검색" />
     </LinearLayout>
+    <!-- 그림자 설정 토글 버튼 -->
+    <Button
+            android:id="@+id/btn_toggle_shadow_settings"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_below="@id/search_container"
+            android:layout_alignParentEnd="true"
+            android:layout_margin="8dp"
+            android:text="그림자 설정"
+            android:textSize="12sp"
+            android:padding="8dp" />
+
+    <!-- 그림자 설정 패널 -->
+    <LinearLayout
+            android:id="@+id/shadow_settings_panel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_below="@id/search_container"
+            android:orientation="vertical"
+            android:padding="8dp"
+            android:background="#FFFFFF"
+            android:elevation="4dp"
+            android:visibility="gone">
+
+        <!-- 날짜/시간 설정 -->
+        <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+            <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="날짜/시간: "
+                    android:textSize="14sp" />
+
+            <TextView
+                    android:id="@+id/tv_selected_time"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textSize="14sp" />
+
+            <Button
+                    android:id="@+id/btn_select_time"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="변경"
+                    android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- 그림자 옵션 -->
+        <RadioGroup
+                android:id="@+id/radio_group_shadow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+            <RadioButton
+                    android:id="@+id/radio_avoid_shadow"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="그림자 피하기"
+                    android:checked="true" />
+
+            <RadioButton
+                    android:id="@+id/radio_follow_shadow"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="그림자 따라가기"
+                    android:layout_marginStart="16dp" />
+        </RadioGroup>
+    </LinearLayout>
 
     <!-- 경로 정보 표시 -->
     <TextView
@@ -44,6 +119,20 @@
             android:textColor="@color/white"
             android:textSize="14sp"
             android:gravity="center"
+            android:visibility="gone" />
+
+    <!-- 경로 선택 버튼 컨테이너 -->
+    <LinearLayout
+            android:id="@+id/route_button_container"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentBottom="true"
+            android:layout_centerHorizontal="true"
+            android:layout_marginBottom="16dp"
+            android:orientation="horizontal"
+            android:background="#80FFFFFF"
+            android:padding="8dp"
+            android:elevation="4dp"
             android:visibility="gone" />
 
     <!-- 검색 결과 리스트 -->
