@@ -1,6 +1,8 @@
 package com.example.Backend.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -9,13 +11,15 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
 @Service
 @Slf4j
 public class TmapApiService {
 
     @Value("${tmap.api.key}")
     private String tmapApiKey;
-
     private final String TMAP_BASE_URL = "https://apis.openapi.sk.com/tmap";
     private final RestTemplate restTemplate;
 
@@ -25,14 +29,16 @@ public class TmapApiService {
 
     public String getWalkingRoute(double startLat, double startLng, double endLat, double endLng) {
         try {
-            // 필수 파라미터만 포함
             String url = TMAP_BASE_URL + "/routes/pedestrian?version=1" +
                     "&startX=" + startLng +
                     "&startY=" + startLat +
                     "&endX=" + endLng +
                     "&endY=" + endLat +
                     "&reqCoordType=WGS84GEO" +
-                    "&resCoordType=WGS84GEO";
+                    "&resCoordType=WGS84GEO" +
+                    "&startName=" + URLEncoder.encode("출발지", StandardCharsets.UTF_8) +
+                    "&endName=" + URLEncoder.encode("도착지", StandardCharsets.UTF_8) +
+                    "&searchOption=0";
 
             log.debug("T맵 API 요청 URL: {}", url);
 
