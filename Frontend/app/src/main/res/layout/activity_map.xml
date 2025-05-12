@@ -104,25 +104,20 @@
 
             <RadioButton
                     android:id="@+id/radio_avoid_shadow"
-                    android:layout_width="wrap_content"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:text="그림자 피하기" />
+                    android:layout_weight="1"
+                    android:text="그림자 X"
+                    android:textSize="14sp" />
 
             <RadioButton
                     android:id="@+id/radio_follow_shadow"
-                    android:layout_width="wrap_content"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:text="그림자 따라가기"
-                    android:layout_marginStart="16dp" />
+                    android:layout_weight="1"
+                    android:text="그림자 O"
+                    android:textSize="14sp" />
         </RadioGroup>
-
-        <!-- 기본 경로로 돌아가기 버튼 -->
-        <Button
-                android:id="@+id/btn_basic_route"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="기본 경로로 돌아가기"
-                android:layout_marginTop="8dp" />
     </LinearLayout>
 
     <!-- 경로 정보 표시 -->
@@ -132,8 +127,8 @@
             android:layout_height="wrap_content"
             android:layout_below="@id/shadow_settings_panel"
             android:background="#80000000"
-            android:padding="8dp"
-            android:textColor="@color/white"
+            android:padding="10dp"
+            android:textColor="#FFFFFF"
             android:textSize="14sp"
             android:gravity="center"
             android:elevation="4dp"
