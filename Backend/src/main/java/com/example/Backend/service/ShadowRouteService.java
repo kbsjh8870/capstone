@@ -113,7 +113,7 @@ public class ShadowRouteService {
 
             // 테이블 존재 여부 확인
             String checkTableSql = "SELECT EXISTS (SELECT FROM information_schema.tables " +
-                    "WHERE table_schema = 'public' AND table_name = 'al_d010_26_20250304')";
+                    "WHERE table_schema = 'public' AND table_name = public.\"AL_D010_26_20250304\")";
             boolean tableExists = jdbcTemplate.queryForObject(checkTableSql, Boolean.class);
 
             if (!tableExists) {
@@ -134,7 +134,7 @@ public class ShadowRouteService {
             String checkFunctionSql = "SELECT EXISTS (SELECT FROM pg_proc WHERE proname = 'calculate_shadow_geometry')";
             boolean functionExists = jdbcTemplate.queryForObject(checkFunctionSql, Boolean.class);
 
-            if (!functionExists) {
+           /* if (!functionExists) {
                 // 함수가 없으면 간단한 그림자 계산 로직 적용
                 shadowSql = "WITH search_area AS (" + boundingBoxSql + ") " +
                         "SELECT b.id, b.\"A16\" as height, " +
@@ -146,7 +146,7 @@ public class ShadowRouteService {
                         "FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
                         "WHERE ST_Intersects(b.geom, sa.search_area) " +
                         "AND b.\"A16\" > 5";  // 의미 있는 높이의 건물만
-            }
+            }*/
 
             // 태양 고도가 낮을 때 방위각에 따른 그림자 방향 계산
             double shadowDirX = -Math.cos(Math.toRadians(sunPos.getAzimuth()));
