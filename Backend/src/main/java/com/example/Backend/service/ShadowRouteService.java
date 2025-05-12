@@ -125,7 +125,7 @@ public class ShadowRouteService {
             String shadowSql = "WITH search_area AS (" + boundingBoxSql + ") " +
                     "SELECT b.id, b.\"A16\" as height, " +
                     "ST_AsGeoJSON(b.geom) as building_geom, " +
-                    "ST_AsGeoJSON(calculate_shadow_geometry(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
+                    "ST_AsGeoJSON(calculate_shadow_geometry(b.geom, b.\"A16\", ?, ?, ?)) as shadow_geom " +  // 3개의 파라미터
                     "FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
                     "WHERE ST_Intersects(b.geom, sa.search_area) " +
                     "AND b.\"A16\" > 5";
@@ -155,8 +155,7 @@ public class ShadowRouteService {
             List<Map<String, Object>> results = jdbcTemplate.queryForList(
                     shadowSql,
                     startLng, startLat, endLng, endLat,
-                    shadowDirX, sunPos.getAltitude(),
-                    shadowDirY, sunPos.getAltitude());
+                    shadowDirX, shadowDirY, sunPos.getAltitude());
 
             // 결과 파싱
             List<ShadowArea> shadowAreas = new ArrayList<>();
