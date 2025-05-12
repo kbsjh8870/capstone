@@ -344,6 +344,12 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         // 검색 결과 목록 숨기기
         rvSearchResults.setVisibility(View.GONE);
 
+        // 기존 경로 제거
+        clearAllRoutes();
+
+        RadioGroup shadowOptions = findViewById(R.id.radio_group_shadow);
+        shadowOptions.clearCheck();
+
         // 목적지 정보 저장
         destinationPoint = item.getPOIPoint();
         destinationName = item.getPOIName();
@@ -497,14 +503,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         }
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        // 리소스 해제
-        if (tMapGps != null) {
-            tMapGps.CloseGps();
-        }
-    }
+
 
     /**
      * 그림자 정보를 고려한 경로 요청
@@ -518,8 +517,21 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         progressBar.setVisibility(View.VISIBLE);
         tvRouteInfo.setVisibility(View.GONE);
 
-        // 기존에 표시된 경로와 그림자 영역 제거
-        clearMapOverlays();
+       /* // 기존에 표시된 경로와 그림자 영역 제거
+        clearMapOverlays();*/
+
+        // 기존에 표시된 경로와 그림자 영역 제거 (지도에서 시각적 요소만 제거)
+        for (TMapPolyLine route : routes) {
+            tMapView.removeTMapPolyLine(route.getID());
+        }
+
+        for (String key : shadowPolygons.keySet()) {
+            tMapView.removeTMapPolygon(key);
+        }
+
+        for (String key : buildingPolygons.keySet()) {
+            tMapView.removeTMapPolygon(key);
+        }
 
         // 그림자 경로 API 호출
         new Thread(() -> {
@@ -626,6 +638,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             return;
         }
 
+        clearMapOverlays();
+        routes.clear(); // 기존 경로 목록도 초기화
+
         // 모든 경로의 좌표점을 저장할 리스트
         List<TMapPoint> allPoints = new ArrayList<>();
 
@@ -688,7 +703,12 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             }
 
             // 경로 지도에 추가
-            tMapView.addTMapPolyLine(polyLine.getID(), polyLine);
+            /*tMapView.addTMapPolyLine(polyLine.getID(), polyLine);
+            routes.add(polyLine);*/
+            if (isBasicRoute) {
+                tMapView.addTMapPolyLine(polyLine.getID(), polyLine);
+            }
+            // 경로 목록에 추가
             routes.add(polyLine);
 
             // 첫 번째 경로(기본 경로)를 현재 경로로 설정
@@ -765,25 +785,25 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             return;
         }
 
-        // 모든 경로 스타일 초기화
+        // 모든 경로를 지도에서 제거
         for (int i = 0; i < routes.size(); i++) {
             TMapPolyLine route = routes.get(i);
-            if (i == 0) {
-                // 기본 경로
-                route.setLineColor(Color.parseColor("#2196F3")); // 파란색
-            } else {
-                // 그림자 경로
-                route.setLineColor(Color.parseColor("#FF5722")); // 주황색
-            }
-            route.setLineWidth(5.0f);
             tMapView.removeTMapPolyLine(route.getID());
-            tMapView.addTMapPolyLine(route.getID(), route);
         }
 
-        // 선택된 경로 강조
+        // 선택된 경로만 지도에 다시 추가
         TMapPolyLine selectedRoute = routes.get(routeIndex);
-        selectedRoute.setLineWidth(8.0f);
-        tMapView.removeTMapPolyLine(selectedRoute.getID());
+
+        // 선택된 경로 스타일 설정
+        if (routeIndex == 0) {
+            // 기본 경로
+            selectedRoute.setLineColor(Color.parseColor("#2196F3")); // 파란색
+        } else {
+            // 그림자 경로
+            selectedRoute.setLineColor(Color.parseColor("#FF5722")); // 주황색
+        }
+
+        selectedRoute.setLineWidth(8.0f); // 선택된 경로는 두껍게 표시
         tMapView.addTMapPolyLine(selectedRoute.getID(), selectedRoute);
 
         // 현재 경로 업데이트
@@ -900,9 +920,20 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             // 현재 날짜/시간으로 초기화
             updateTimeDisplay(tvSelectedTime, selectedDateTime);
 
-            // 그림자 옵션 라디오 버튼
+            // 그림자 옵션 라디오 버튼 그룹
+            RadioGroup shadowOptions = findViewById(R.id.radio_group_shadow);
             RadioButton radioAvoidShadow = findViewById(R.id.radio_avoid_shadow);
             RadioButton radioFollowShadow = findViewById(R.id.radio_follow_shadow);
+
+            shadowOptions.clearCheck();
+
+            // 경로 선택 전용 상태 변수 추가
+            final int ROUTE_TYPE_BASIC = 0;      // 기본 경로
+            final int ROUTE_TYPE_AVOID = 1;      // 그림자 회피 경로
+            final int ROUTE_TYPE_FOLLOW = 2;     // 그림자 따라가기 경로
+
+            // 현재 선택된 경로 상태 (초기값: 기본 경로)
+            final int[] currentRouteType = {ROUTE_TYPE_BASIC};
 
             // 날짜/시간 선택 버튼 이벤트
             btnSelectTime.setOnClickListener(v -> {
@@ -918,13 +949,33 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             });
 
             // 그림자 옵션 변경 이벤트
-            RadioGroup shadowOptions = findViewById(R.id.radio_group_shadow);
             shadowOptions.setOnCheckedChangeListener((group, checkedId) -> {
-                avoidShadow = (checkedId == R.id.radio_avoid_shadow);
+                if (checkedId == R.id.radio_avoid_shadow) {
+                    avoidShadow = true;
+                    currentRouteType[0] = ROUTE_TYPE_AVOID;
+                } else if (checkedId == R.id.radio_follow_shadow) {
+                    avoidShadow = false;
+                    currentRouteType[0] = ROUTE_TYPE_FOLLOW;
+                }
 
-                // 경로가 설정된 상태라면 재계산
+                // 경로가 설정된 상태라면 새 경로 계산
                 if (currentLocation != null && destinationPoint != null) {
                     requestShadowRoutes();
+                }
+            });
+
+            // "기본 경로로 돌아가기" 버튼 추가
+            Button btnBasicRoute = findViewById(R.id.btn_basic_route);
+            btnBasicRoute.setOnClickListener(v -> {
+                // 라디오 버튼 선택 해제
+                shadowOptions.clearCheck();
+
+                // 경로 타입 기본으로 설정
+                currentRouteType[0] = ROUTE_TYPE_BASIC;
+
+                // 기존 경로가 있다면 기본 경로만 표시
+                if (routes.size() > 0) {
+                    showOnlyBasicRoute();
                 }
             });
 
@@ -987,5 +1038,76 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         } catch (Exception e) {
             Log.e(TAG, "날짜/시간 표시 오류: " + e.getMessage(), e);
         }
+    }
+
+    private void clearAllRoutes() {
+        // 모든 경로 제거
+        for (TMapPolyLine route : routes) {
+            tMapView.removeTMapPolyLine(route.getID());
+        }
+        routes.clear();
+
+        // 그림자 영역 제거
+        for (String key : shadowPolygons.keySet()) {
+            tMapView.removeTMapPolygon(key);
+        }
+        shadowPolygons.clear();
+
+        // 건물 영역 제거
+        for (String key : buildingPolygons.keySet()) {
+            tMapView.removeTMapPolygon(key);
+        }
+        buildingPolygons.clear();
+
+        // 현재 경로 참조 제거
+        currentRoute = null;
+
+        // 경로 정보 텍스트 숨기기
+        tvRouteInfo.setVisibility(View.GONE);
+
+        // 경로 버튼 컨테이너 숨기기
+        LinearLayout routeButtonContainer = findViewById(R.id.route_button_container);
+        routeButtonContainer.setVisibility(View.GONE);
+    }
+
+    /**
+     * 기본 경로만 표시하고 다른 경로는 숨김
+     */
+    private void showOnlyBasicRoute() {
+        if (routes.isEmpty()) return;
+
+        // 모든 경로 제거
+        for (TMapPolyLine route : routes) {
+            tMapView.removeTMapPolyLine(route.getID());
+        }
+
+        // 기본 경로만 다시 추가
+        TMapPolyLine basicRoute = routes.get(0);
+        basicRoute.setLineWidth(5.0f);
+        tMapView.addTMapPolyLine(basicRoute.getID(), basicRoute);
+
+        // 현재 경로 업데이트
+        currentRoute = basicRoute;
+
+        // 그림자 영역 숨기기
+        for (String key : shadowPolygons.keySet()) {
+            tMapView.removeTMapPolygon(key);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // TODO: 앱이 전면에 나타날 때 경로 초기화가 필요하면? 추가
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // 리소스 해제
+        if (tMapGps != null) {
+            tMapGps.CloseGps();
+        }
+        clearAllRoutes();
     }
 }
