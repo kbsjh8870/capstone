@@ -113,7 +113,7 @@ public class ShadowRouteService {
 
             // 테이블 존재 여부 확인
             String checkTableSql = "SELECT EXISTS (SELECT FROM information_schema.tables " +
-                    "WHERE table_schema = 'public' AND table_name = \"AL_D010_26_20250304\")";
+                    "WHERE table_schema = 'public' AND table_name = 'AL_D010_26_20250304')";
             boolean tableExists = jdbcTemplate.queryForObject(checkTableSql, Boolean.class);
 
             if (!tableExists) {
