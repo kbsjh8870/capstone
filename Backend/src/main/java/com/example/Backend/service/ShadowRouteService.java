@@ -113,7 +113,7 @@ public class ShadowRouteService {
 
             // 테이블 존재 여부 확인
             String checkTableSql = "SELECT EXISTS (SELECT FROM information_schema.tables " +
-                    "WHERE table_schema = 'public' AND table_name = public.\"AL_D010_26_20250304\")";
+                    "WHERE table_schema = 'public' AND table_name = \"AL_D010_26_20250304\")";
             boolean tableExists = jdbcTemplate.queryForObject(checkTableSql, Boolean.class);
 
             if (!tableExists) {
@@ -128,7 +128,7 @@ public class ShadowRouteService {
                     "ST_AsGeoJSON(calculate_shadow_geometry(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
                     "FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
                     "WHERE ST_Intersects(b.geom, sa.search_area) " +
-                    "AND b.\"A16\" > 5";  // 의미 있는 높이의 건물만
+                    "AND b.\"A16\" > 5";
 
             // calculate_shadow_geometry 함수 존재 확인
             String checkFunctionSql = "SELECT EXISTS (SELECT FROM pg_proc WHERE proname = 'calculate_shadow_geometry')";
