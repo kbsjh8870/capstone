@@ -3,6 +3,13 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent">
 
+    <!-- 지도가 표시될 레이아웃 (가장 아래 위치) -->
+    <RelativeLayout
+            android:id="@+id/map_layout"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+    </RelativeLayout>
+
     <!-- 상단 검색바 -->
     <LinearLayout
             android:id="@+id/search_container"
@@ -32,7 +39,8 @@
                 android:layout_marginStart="8dp"
                 android:text="검색" />
     </LinearLayout>
-    <!-- 그림자 설정 토글 버튼 -->
+
+    <!-- 그림자 설정 토글 버튼 (항상 지도 위에 표시) -->
     <Button
             android:id="@+id/btn_toggle_shadow_settings"
             android:layout_width="wrap_content"
@@ -42,9 +50,11 @@
             android:layout_margin="8dp"
             android:text="그림자 설정"
             android:textSize="12sp"
-            android:padding="8dp" />
+            android:padding="8dp"
+            android:background="#80FFFFFF"
+            android:elevation="4dp" />
 
-    <!-- 그림자 설정 패널 -->
+    <!-- 그림자 설정 패널 (상단에 고정) -->
     <LinearLayout
             android:id="@+id/shadow_settings_panel"
             android:layout_width="match_parent"
@@ -52,7 +62,7 @@
             android:layout_below="@id/search_container"
             android:orientation="vertical"
             android:padding="8dp"
-            android:background="#FFFFFF"
+            android:background="#EEFFFFFF"
             android:elevation="4dp"
             android:visibility="gone">
 
@@ -96,8 +106,7 @@
                     android:id="@+id/radio_avoid_shadow"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="그림자 피하기"
-                    android:checked="true" />
+                    android:text="그림자 피하기" />
 
             <RadioButton
                     android:id="@+id/radio_follow_shadow"
@@ -106,6 +115,14 @@
                     android:text="그림자 따라가기"
                     android:layout_marginStart="16dp" />
         </RadioGroup>
+
+        <!-- 기본 경로로 돌아가기 버튼 -->
+        <Button
+                android:id="@+id/btn_basic_route"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="기본 경로로 돌아가기"
+                android:layout_marginTop="8dp" />
     </LinearLayout>
 
     <!-- 경로 정보 표시 -->
@@ -113,12 +130,13 @@
             android:id="@+id/tv_route_info"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_below="@id/search_container"
+            android:layout_below="@id/shadow_settings_panel"
             android:background="#80000000"
             android:padding="8dp"
             android:textColor="@color/white"
             android:textSize="14sp"
             android:gravity="center"
+            android:elevation="4dp"
             android:visibility="gone" />
 
     <!-- 경로 선택 버튼 컨테이너 -->
@@ -145,19 +163,12 @@
             android:elevation="4dp"
             android:visibility="gone" />
 
-    <!-- 지도가 표시될 레이아웃 -->
-    <RelativeLayout
-            android:id="@+id/map_layout"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:layout_below="@id/search_container">
-    </RelativeLayout>
-
     <!-- 로딩 표시 -->
     <ProgressBar
             android:id="@+id/progress_bar"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_centerInParent="true"
+            android:elevation="5dp"
             android:visibility="gone" />
 </RelativeLayout>
