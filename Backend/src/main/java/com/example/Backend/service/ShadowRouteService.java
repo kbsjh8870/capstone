@@ -239,8 +239,8 @@ public class ShadowRouteService {
             String baseRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
             Route baseRoute = parseBasicRoute(baseRouteJson);
 
-            if (baseRoute.getPoints().size() < 3) {
-                logger.debug("기본 경로가 너무 짧음. 그대로 사용");
+            if (baseRoute.getPoints().size() < 5) {
+                logger.debug("기본 경로가 너무 짧음 ({}개 포인트). 그대로 사용", baseRoute.getPoints().size());
                 baseRoute.setAvoidShadow(avoidShadow);
                 return baseRoute;
             }
@@ -266,12 +266,30 @@ public class ShadowRouteService {
             Route waypointRoute = parseBasicRoute(waypointRouteJson);
             waypointRoute.setAvoidShadow(avoidShadow);
 
-            // 4. 생성된 경로가 유효한지 확인
-            if (waypointRoute.getPoints().size() >= baseRoute.getPoints().size()) {
-                logger.debug("경유지 경로 생성 성공: 포인트 수=" + waypointRoute.getPoints().size());
-                return waypointRoute;
+            // 4. 생성된 경로가 유효하고 기본 경로와 충분히 다른지 확인
+            if (waypointRoute.getPoints().size() >= baseRoute.getPoints().size() * 0.8 &&
+                    waypointRoute.getPoints().size() <= baseRoute.getPoints().size() * 3) {
+
+                // 경로 거리 차이 확인
+                double distanceDiff = Math.abs(waypointRoute.getDistance() - baseRoute.getDistance());
+                double distanceRatio = distanceDiff / baseRoute.getDistance();
+
+                logger.debug("경로 비교: 기본={}포인트/{}m, 경유지={}포인트/{}m, 거리차이={}%",
+                        baseRoute.getPoints().size(), (int)baseRoute.getDistance(),
+                        waypointRoute.getPoints().size(), (int)waypointRoute.getDistance(),
+                        (int)(distanceRatio * 100));
+
+                // 거리 차이가 너무 크지 않으면 경유지 경로 사용
+                if (distanceRatio < 0.5) { // 기본 경로 대비 50% 이내 차이
+                    logger.debug("경유지 경로 사용");
+                    return waypointRoute;
+                } else {
+                    logger.debug("경유지 경로가 너무 멀어서 기본 경로 사용");
+                    baseRoute.setAvoidShadow(avoidShadow);
+                    return baseRoute;
+                }
             } else {
-                logger.debug("경유지 경로가 기본 경로보다 단순함. 기본 경로 사용");
+                logger.debug("경유지 경로가 부적절함. 기본 경로 사용");
                 baseRoute.setAvoidShadow(avoidShadow);
                 return baseRoute;
             }
@@ -295,17 +313,31 @@ public class ShadowRouteService {
      */
     private RoutePoint findBestWaypoint(List<RoutePoint> basePoints, String mergedShadows, boolean avoidShadow) {
         try {
-            // 경로의 중간 부분에서 경유지 후보들 찾기
-            int startIndex = basePoints.size() / 4;  // 25% 지점부터
-            int endIndex = basePoints.size() * 3 / 4; // 75% 지점까지
+            // 경로의 중간 부분에서만 경유지 후보 찾기 (시작/끝 20% 제외)
+            int startIndex = basePoints.size() / 5;  // 20% 지점부터
+            int endIndex = basePoints.size() * 4 / 5; // 80% 지점까지
+
+            // 인덱스 범위 검증
+            startIndex = Math.max(1, startIndex);
+            endIndex = Math.min(basePoints.size() - 2, endIndex);
+
+            if (startIndex >= endIndex) {
+                logger.debug("경로가 너무 짧아 적절한 경유지 범위를 설정할 수 없음");
+                return null;
+            }
+
+            logger.debug("경유지 후보 범위: {}~{} (전체 {}개 포인트)", startIndex, endIndex, basePoints.size());
 
             List<RoutePoint> candidates = new ArrayList<>();
 
-            // 후보 지점들 수집
-            for (int i = startIndex; i <= endIndex; i += Math.max(1, (endIndex - startIndex) / 5)) {
+            // 후보 지점들 수집 (중간 부분에서만)
+            int step = Math.max(1, (endIndex - startIndex) / 8); // 최대 8개 후보
+            for (int i = startIndex; i <= endIndex; i += step) {
                 if (i >= basePoints.size()) break;
                 candidates.add(basePoints.get(i));
             }
+
+            logger.debug("경유지 후보 개수: {}", candidates.size());
 
             // 각 후보에 대해 그림자 여부 확인하고 적절한 우회지점 생성
             for (RoutePoint candidate : candidates) {
@@ -324,9 +356,16 @@ public class ShadowRouteService {
                 }
             }
 
-            // 적절한 경유지를 찾지 못하면 중간지점 기준으로 생성
-            RoutePoint midPoint = basePoints.get(basePoints.size() / 2);
-            return generateNearbyWaypoint(midPoint, basePoints, avoidShadow);
+            // 적절한 경유지를 찾지 못하면 안전한 중간지점 사용
+            int safeMiddleIndex = (startIndex + endIndex) / 2;
+            RoutePoint safeMiddlePoint = basePoints.get(safeMiddleIndex);
+            RoutePoint safeWaypoint = generateNearbyWaypoint(safeMiddlePoint, basePoints, avoidShadow);
+
+            if (safeWaypoint != null) {
+                logger.debug("안전한 중간 경유지 생성: ({}, {})", safeWaypoint.getLat(), safeWaypoint.getLng());
+            }
+
+            return safeWaypoint;
 
         } catch (Exception e) {
             logger.error("경유지 찾기 오류: " + e.getMessage(), e);
@@ -341,30 +380,44 @@ public class ShadowRouteService {
         try {
             // 기본 경로의 방향 벡터 계산
             int originalIndex = findPointIndex(originalPoint, basePoints);
-            if (originalIndex < 1 || originalIndex >= basePoints.size() - 1) {
+
+            // 안전한 인덱스 범위 확인
+            int prevIndex = Math.max(0, originalIndex - 5);
+            int nextIndex = Math.min(basePoints.size() - 1, originalIndex + 5);
+
+            if (prevIndex >= nextIndex) {
+                logger.debug("경로가 너무 짧아 방향 벡터를 계산할 수 없음");
                 return null;
             }
 
-            RoutePoint prevPoint = basePoints.get(originalIndex - 3 < 0 ? 0 : originalIndex - 3);
-            RoutePoint nextPoint = basePoints.get(originalIndex + 3 >= basePoints.size() ? basePoints.size() - 1 : originalIndex + 3);
+            RoutePoint prevPoint = basePoints.get(prevIndex);
+            RoutePoint nextPoint = basePoints.get(nextIndex);
 
-            // 경로의 진행 방향
+            // 경로의 진행 방향 계산
             double dx = nextPoint.getLng() - prevPoint.getLng();
             double dy = nextPoint.getLat() - prevPoint.getLat();
 
+            // 벡터 길이 확인
+            double vectorLength = Math.sqrt(dx * dx + dy * dy);
+            if (vectorLength == 0) {
+                logger.debug("방향 벡터의 길이가 0");
+                return null;
+            }
+
             // 수직 방향으로 우회 (좌측 또는 우측)
-            double perpX = -dy;
-            double perpY = dx;
+            double perpX = -dy / vectorLength;
+            double perpY = dx / vectorLength;
 
-            // 정규화
-            double length = Math.sqrt(perpX * perpX + perpY * perpY);
-            if (length == 0) return null;
+            // 우회 거리 조정 - 전체 경로 길이에 비례
+            double totalDistance = calculateDistance(
+                    basePoints.get(0).getLat(), basePoints.get(0).getLng(),
+                    basePoints.get(basePoints.size()-1).getLat(), basePoints.get(basePoints.size()-1).getLng()
+            );
 
-            perpX /= length;
-            perpY /= length;
+            // 우회 거리를 전체 경로 길이의 10-20% 정도로 설정
+            double detourDistance = Math.min(0.003, Math.max(0.001, totalDistance * 0.15));
 
-            // 우회 거리 (약 100-300미터 정도)
-            double detourDistance = 0.002; // 위도/경도 단위로 약 200미터
+            logger.debug("전체 거리: {}, 우회 거리: {}", totalDistance, detourDistance);
 
             // 그림자 회피면 한쪽으로, 따라가기면 반대쪽으로
             int direction = avoidShadow ? 1 : -1;
@@ -372,6 +425,22 @@ public class ShadowRouteService {
             RoutePoint waypoint = new RoutePoint();
             waypoint.setLat(originalPoint.getLat() + direction * perpY * detourDistance);
             waypoint.setLng(originalPoint.getLng() + direction * perpX * detourDistance);
+
+            // 생성된 경유지가 시작점이나 끝점과 너무 가깝지 않은지 확인
+            RoutePoint startPoint = basePoints.get(0);
+            RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
+
+            double distToStart = calculateDistance(waypoint.getLat(), waypoint.getLng(), startPoint.getLat(), startPoint.getLng());
+            double distToEnd = calculateDistance(waypoint.getLat(), waypoint.getLng(), endPoint.getLat(), endPoint.getLng());
+
+            // 시작점이나 끝점과 너무 가까우면 null 반환
+            if (distToStart < totalDistance * 0.2 || distToEnd < totalDistance * 0.2) {
+                logger.debug("경유지가 시작점 또는 끝점과 너무 가까움 (시작점 거리: {}, 끝점 거리: {})", distToStart, distToEnd);
+                return null;
+            }
+
+            logger.debug("경유지 생성 성공: ({}, {}), 시작점 거리: {}, 끝점 거리: {}",
+                    waypoint.getLat(), waypoint.getLng(), distToStart, distToEnd);
 
             return waypoint;
 
