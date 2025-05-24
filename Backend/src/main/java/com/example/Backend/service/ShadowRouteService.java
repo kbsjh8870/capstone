@@ -165,11 +165,15 @@ public class ShadowRouteService {
                 shadowAreas.add(area);
             }
 
+            logger.debug("건물 검색 결과: " + results.size() + "개 건물");
+
             return shadowAreas;
         } catch (Exception e) {
             logger.error("건물 그림자 계산 오류: " + e.getMessage(), e);
             return new ArrayList<>();
         }
+
+
     }
 
     /**
@@ -350,9 +354,15 @@ public class ShadowRouteService {
      * 그림자 비율 계산
      */
     private void calculateShadowPercentage(Route route, List<ShadowArea> shadowAreas) {
+
+        logger.debug("=== 그림자 비율 계산 디버깅 ===");
+        logger.debug("shadowAreas 개수: " + shadowAreas.size());
+
+
         List<RoutePoint> points = route.getPoints();
         
         if (shadowAreas.isEmpty()) {
+            logger.debug("그림자 영역이 없음");
             route.setShadowPercentage(0);
             return;
         }
@@ -360,6 +370,7 @@ public class ShadowRouteService {
         try {
             // 그림자 영역들을 하나의 다각형으로 합치기
             String mergedShadows = createShadowUnion(shadowAreas);
+            logger.debug("병합된 그림자 GeoJSON 길이: " + mergedShadows.length());
 
             if (mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}")) {
                 route.setShadowPercentage(50);
@@ -426,10 +437,13 @@ public class ShadowRouteService {
 
             route.setShadowPercentage(shadowPercentage);
 
+
+
         } catch (Exception e) {
             logger.error("그림자 비율 계산 오류: " + e.getMessage(), e);
             route.setShadowPercentage(0);
         }
+
     }
 
     /**
