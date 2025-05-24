@@ -74,12 +74,8 @@ public class ShadowRouteService {
             shadowRoute.setDateTime(dateTime);
             shadowRoute.setBasicRoute(false);
 
-            // 그림자 비율 계산
-            if (!shadowAreas.isEmpty()) {
-                calculateShadowPercentage(shadowRoute, shadowAreas);
-            } else {
-                shadowRoute.setShadowPercentage(avoidShadow ? 15 : 75); // 임의의 그림자 비율
-            }
+            // 그림자 비율 계산 - 항상 수행
+            calculateShadowPercentage(shadowRoute, shadowAreas);
 
             routes.add(shadowRoute);
             return routes;
@@ -152,7 +148,7 @@ public class ShadowRouteService {
             double shadowDirX = -Math.cos(Math.toRadians(sunPos.getAzimuth()));
             double shadowDirY = -Math.sin(Math.toRadians(sunPos.getAzimuth()));
 
-            // 파라미터 바인딩
+            // 파라미터 바인딩ㅛ
             List<Map<String, Object>> results = jdbcTemplate.queryForList(
                     shadowSql,
                     startLng, startLat, endLng, endLat,
@@ -354,8 +350,21 @@ public class ShadowRouteService {
      * 그림자 비율 계산
      */
     private void calculateShadowPercentage(Route route, List<ShadowArea> shadowAreas) {
+        List<RoutePoint> points = route.getPoints();
+        
         if (shadowAreas.isEmpty()) {
-            route.setShadowPercentage(50); // 기본값
+            // 그림자 영역이 없을 때 테스트 데이터 생성
+            logger.warn("그림자 영역 데이터 없음 - 테스트 데이터 생성");
+            
+            // 10개 포인트마다 그림자 상태 변경 (테스트용)
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
+                boolean inShadow = (i / 10) % 2 == 1;
+                point.setInShadow(inShadow);
+            }
+            
+            // 대략적인 그림자 비율 설정
+            route.setShadowPercentage(route.isAvoidShadow() ? 20 : 70);
             return;
         }
 
@@ -369,7 +378,6 @@ public class ShadowRouteService {
             }
 
             // 경로 포인트별 그림자 포함 여부 확인
-            List<RoutePoint> points = route.getPoints();
             double totalDistance = 0;
             double shadowDistance = 0;
 
@@ -409,6 +417,18 @@ public class ShadowRouteService {
                 // 그림자 여부 설정 (시각화용)
                 p1.setInShadow(p1InShadow);
                 p2.setInShadow(p2InShadow);
+            }
+            
+            // 마지막 포인트 처리
+            if (points.size() > 0) {
+                RoutePoint lastPoint = points.get(points.size() - 1);
+                try {
+                    boolean lastInShadow = jdbcTemplate.queryForObject(
+                            pointInShadowSql, Boolean.class, mergedShadows, lastPoint.getLng(), lastPoint.getLat());
+                    lastPoint.setInShadow(lastInShadow);
+                } catch (Exception e) {
+                    logger.warn("마지막 포인트 그림자 확인 실패: " + e.getMessage());
+                }
             }
 
             // 그림자 비율 계산 (%)
