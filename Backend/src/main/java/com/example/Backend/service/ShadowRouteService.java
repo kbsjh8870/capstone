@@ -120,21 +120,14 @@ public class ShadowRouteService {
             }
 
             // 해당 영역 내 건물 검색 및 그림자 계산
-            /*String shadowSql = "WITH search_area AS (" + boundingBoxSql + ") " +
-                    "SELECT b.id, b.\"A16\" as height, " +
-                    "ST_AsGeoJSON(b.geom) as building_geom, " +
-                    "ST_AsGeoJSON(calculate_shadow_geometry(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
-                    "FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
-                    "WHERE ST_Intersects(b.geom, sa.search_area) " +
-                    "AND b.\"A16\" > 5";*/
-
             String shadowSql = "WITH search_area AS (" + boundingBoxSql + ") " +
                     "SELECT b.id, b.\"A16\" as height, " +
-                    "ST_AsGeoJSON(ST_Transform(b.geom, 4326)) as building_geom, " +  // 변환 추가
-                    "ST_AsGeoJSON(calculate_shadow_geometry(ST_Transform(b.geom, 4326), b.\"A16\", ?, ?)) as shadow_geom " +
+                    "ST_AsGeoJSON(b.geom) as building_geom, " +  // ST_Transform 제거
+                    "ST_AsGeoJSON(calculate_shadow_geometry(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
                     "FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
-                    "WHERE ST_Intersects(ST_Transform(b.geom, 4326), sa.search_area) " +  // 변환 추가
+                    "WHERE ST_Intersects(b.geom, sa.search_area) " +  // ST_Transform 제거
                     "AND b.\"A16\" > 5";
+
             // calculate_shadow_geometry 함수 존재 확인
             String checkFunctionSql = "SELECT EXISTS (SELECT FROM pg_proc WHERE proname = 'calculate_shadow_geometry')";
             boolean functionExists = jdbcTemplate.queryForObject(checkFunctionSql, Boolean.class);
@@ -406,9 +399,7 @@ public class ShadowRouteService {
             double totalDistance = 0;
             double shadowDistance = 0;
 
-            /*String pointInShadowSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";*/
-            String pointInShadowSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), " +
-                    "ST_Transform(ST_SetSRID(ST_MakePoint(?, ?), 4326), 4326))";
+            String pointInShadowSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
 
             for (int i = 0; i < points.size() - 1; i++) {
                 RoutePoint p1 = points.get(i);
