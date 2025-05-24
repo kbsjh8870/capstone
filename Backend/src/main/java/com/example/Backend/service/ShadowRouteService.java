@@ -191,11 +191,14 @@ public class ShadowRouteService {
             boolean avoidShadow) {
 
         try {
+            logger.debug("=== calculateShadowAwareRoute 시작 ===");
+            logger.debug("시작점: ({}, {}), 끝점: ({}, {})", startLat, startLng, endLat, endLng);
+            logger.debug("그림자 회피: {}", avoidShadow);
+
             // 그림자 영역들을 하나의 다각형으로 합치기
             String mergedShadows = createShadowUnion(shadowAreas);
 
             if (mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}") || shadowAreas.isEmpty()) {
-                // 그림자 영역이 없으면 기본 경로 요청
                 logger.debug("그림자 영역이 없음. 기본 경로 사용");
                 String basicRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
                 Route basicRoute = parseBasicRoute(basicRouteJson);
@@ -203,45 +206,13 @@ public class ShadowRouteService {
                 return basicRoute;
             }
 
-            // 출발점과 도착점 포인트
-            String startPoint = String.format("POINT(%f %f)", startLng, startLat);
-            String endPoint = String.format("POINT(%f %f)", endLng, endLat);
+            // DB 함수 사용하지 않고 직접 T맵 API 경유지 기능 사용
+            logger.debug("T맵 API 경유지 기능을 사용하여 실제 경로 생성");
 
-            // 함수 존재 여부 확인
-            String checkFunctionSql = "SELECT EXISTS (SELECT FROM pg_proc WHERE proname = 'calculate_shadow_aware_route')";
-            boolean functionExists = false;
+            Route route = createRealWaypointRoute(startLat, startLng, endLat, endLng, mergedShadows, avoidShadow);
 
-            try {
-                functionExists = jdbcTemplate.queryForObject(checkFunctionSql, Boolean.class);
-            } catch (Exception e) {
-                logger.warn("함수 존재 여부 확인 실패: " + e.getMessage());
-            }
-
-            Route route;
-
-            if (functionExists) {
-                // DB 함수를 사용하여 그림자 경로 계산
-                String sql = "SELECT ST_AsGeoJSON(calculate_shadow_aware_route(" +
-                        "ST_GeomFromText(?, 4326), " +  // 시작점
-                        "ST_GeomFromText(?, 4326), " +  // 도착점
-                        "ST_GeomFromGeoJSON(?), " +    // 병합된 그림자 영역
-                        "?)) AS route_geom";           // 그림자 회피 여부
-
-                String routeGeoJson = jdbcTemplate.queryForObject(
-                        sql, String.class, startPoint, endPoint, mergedShadows, avoidShadow);
-
-                route = parseRouteFromGeoJson(routeGeoJson, avoidShadow);
-            } else {
-                // DB 함수가 없으면 기본 T맵 API 경로 사용하고 그림자 정보만 추가
-                logger.debug("calculate_shadow_aware_route 함수가 없음. 기본 경로 사용");
-
-                String tmapRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
-                route = parseBasicRoute(tmapRouteJson);
-                route.setAvoidShadow(avoidShadow);
-
-                // 기본 경로에 실제 그림자 정보 추가
-                addRealShadowInfoToRoute(route, mergedShadows);
-            }
+            // 생성된 경로에 실제 그림자 정보 추가
+            addRealShadowInfoToRoute(route, mergedShadows);
 
             return route;
 
@@ -258,7 +229,185 @@ public class ShadowRouteService {
             }
         }
     }
+    /**
+     * T맵 API 경유지 기능으로 실제 도로 기반 경로 생성
+     */
+    private Route createRealWaypointRoute(double startLat, double startLng, double endLat, double endLng,
+                                          String mergedShadows, boolean avoidShadow) {
+        try {
+            // 1. 먼저 기본 경로 획득
+            String baseRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
+            Route baseRoute = parseBasicRoute(baseRouteJson);
 
+            if (baseRoute.getPoints().size() < 3) {
+                logger.debug("기본 경로가 너무 짧음. 그대로 사용");
+                baseRoute.setAvoidShadow(avoidShadow);
+                return baseRoute;
+            }
+
+            // 2. 기본 경로에서 적절한 경유지 찾기
+            RoutePoint waypoint = findBestWaypoint(baseRoute.getPoints(), mergedShadows, avoidShadow);
+
+            if (waypoint == null) {
+                logger.debug("적절한 경유지를 찾지 못함. 기본 경로 사용");
+                baseRoute.setAvoidShadow(avoidShadow);
+                return baseRoute;
+            }
+
+            // 3. T맵 API로 경유지 포함 실제 경로 요청
+            logger.debug("경유지 위치: ({}, {})", waypoint.getLat(), waypoint.getLng());
+
+            String waypointRouteJson = tmapApiService.getWalkingRouteWithWaypoint(
+                    startLat, startLng,
+                    waypoint.getLat(), waypoint.getLng(),
+                    endLat, endLng
+            );
+
+            Route waypointRoute = parseBasicRoute(waypointRouteJson);
+            waypointRoute.setAvoidShadow(avoidShadow);
+
+            // 4. 생성된 경로가 유효한지 확인
+            if (waypointRoute.getPoints().size() >= baseRoute.getPoints().size()) {
+                logger.debug("경유지 경로 생성 성공: 포인트 수=" + waypointRoute.getPoints().size());
+                return waypointRoute;
+            } else {
+                logger.debug("경유지 경로가 기본 경로보다 단순함. 기본 경로 사용");
+                baseRoute.setAvoidShadow(avoidShadow);
+                return baseRoute;
+            }
+
+        } catch (Exception e) {
+            logger.error("실제 경유지 경로 생성 실패: " + e.getMessage(), e);
+            // 실패 시 기본 경로 반환
+            try {
+                String fallbackRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
+                Route fallbackRoute = parseBasicRoute(fallbackRouteJson);
+                fallbackRoute.setAvoidShadow(avoidShadow);
+                return fallbackRoute;
+            } catch (Exception fallbackException) {
+                return createSimplePath(startLat, startLng, endLat, endLng);
+            }
+        }
+    }
+
+    /**
+     * 기본 경로에서 최적의 경유지 찾기
+     */
+    private RoutePoint findBestWaypoint(List<RoutePoint> basePoints, String mergedShadows, boolean avoidShadow) {
+        try {
+            // 경로의 중간 부분에서 경유지 후보들 찾기
+            int startIndex = basePoints.size() / 4;  // 25% 지점부터
+            int endIndex = basePoints.size() * 3 / 4; // 75% 지점까지
+
+            List<RoutePoint> candidates = new ArrayList<>();
+
+            // 후보 지점들 수집
+            for (int i = startIndex; i <= endIndex; i += Math.max(1, (endIndex - startIndex) / 5)) {
+                if (i >= basePoints.size()) break;
+                candidates.add(basePoints.get(i));
+            }
+
+            // 각 후보에 대해 그림자 여부 확인하고 적절한 우회지점 생성
+            for (RoutePoint candidate : candidates) {
+                boolean isInShadow = isPointInShadowArea(candidate, mergedShadows);
+
+                // 그림자 회피/따라가기 전략에 따라 판단
+                if ((avoidShadow && isInShadow) || (!avoidShadow && !isInShadow)) {
+                    // 조건에 맞지 않는 지점이면 우회 경유지 생성
+                    RoutePoint detourWaypoint = generateNearbyWaypoint(candidate, basePoints, avoidShadow);
+                    if (detourWaypoint != null) {
+                        logger.debug("경유지 생성: 원본({}, {}) -> 경유지({}, {})",
+                                candidate.getLat(), candidate.getLng(),
+                                detourWaypoint.getLat(), detourWaypoint.getLng());
+                        return detourWaypoint;
+                    }
+                }
+            }
+
+            // 적절한 경유지를 찾지 못하면 중간지점 기준으로 생성
+            RoutePoint midPoint = basePoints.get(basePoints.size() / 2);
+            return generateNearbyWaypoint(midPoint, basePoints, avoidShadow);
+
+        } catch (Exception e) {
+            logger.error("경유지 찾기 오류: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * 주변의 실제 도로 지점으로 경유지 생성
+     */
+    private RoutePoint generateNearbyWaypoint(RoutePoint originalPoint, List<RoutePoint> basePoints, boolean avoidShadow) {
+        try {
+            // 기본 경로의 방향 벡터 계산
+            int originalIndex = findPointIndex(originalPoint, basePoints);
+            if (originalIndex < 1 || originalIndex >= basePoints.size() - 1) {
+                return null;
+            }
+
+            RoutePoint prevPoint = basePoints.get(originalIndex - 3 < 0 ? 0 : originalIndex - 3);
+            RoutePoint nextPoint = basePoints.get(originalIndex + 3 >= basePoints.size() ? basePoints.size() - 1 : originalIndex + 3);
+
+            // 경로의 진행 방향
+            double dx = nextPoint.getLng() - prevPoint.getLng();
+            double dy = nextPoint.getLat() - prevPoint.getLat();
+
+            // 수직 방향으로 우회 (좌측 또는 우측)
+            double perpX = -dy;
+            double perpY = dx;
+
+            // 정규화
+            double length = Math.sqrt(perpX * perpX + perpY * perpY);
+            if (length == 0) return null;
+
+            perpX /= length;
+            perpY /= length;
+
+            // 우회 거리 (약 100-300미터 정도)
+            double detourDistance = 0.002; // 위도/경도 단위로 약 200미터
+
+            // 그림자 회피면 한쪽으로, 따라가기면 반대쪽으로
+            int direction = avoidShadow ? 1 : -1;
+
+            RoutePoint waypoint = new RoutePoint();
+            waypoint.setLat(originalPoint.getLat() + direction * perpY * detourDistance);
+            waypoint.setLng(originalPoint.getLng() + direction * perpX * detourDistance);
+
+            return waypoint;
+
+        } catch (Exception e) {
+            logger.error("주변 경유지 생성 오류: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * 리스트에서 특정 포인트의 인덱스 찾기
+     */
+    private int findPointIndex(RoutePoint target, List<RoutePoint> points) {
+        for (int i = 0; i < points.size(); i++) {
+            RoutePoint point = points.get(i);
+            if (Math.abs(point.getLat() - target.getLat()) < 0.0001 &&
+                    Math.abs(point.getLng() - target.getLng()) < 0.0001) {
+                return i;
+            }
+        }
+        return points.size() / 2; // 못 찾으면 중간점 반환
+    }
+
+    /**
+     * 점이 그림자 영역에 있는지 확인
+     */
+    private boolean isPointInShadowArea(RoutePoint point, String mergedShadows) {
+        try {
+            String sql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
+            return jdbcTemplate.queryForObject(sql, Boolean.class,
+                    mergedShadows, point.getLng(), point.getLat());
+        } catch (Exception e) {
+            logger.warn("그림자 영역 확인 실패: " + e.getMessage());
+            return false;
+        }
+    }
     /**
      * 기본 경로를 복사해서 그림자 경로 생성 (실제 DB 데이터만 사용)
      */
