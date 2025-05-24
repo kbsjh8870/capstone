@@ -101,6 +101,8 @@ public class ShadowRouteService {
     private List<ShadowArea> calculateBuildingShadows(double startLat, double startLng,
                                                       double endLat, double endLng,
                                                       SunPosition sunPos) {
+
+
         try {
             // 경로 주변 영역 정의 (출발-도착 경로 박스 + 버퍼)
             String boundingBoxSql = "SELECT ST_Buffer(ST_Envelope(ST_MakeLine(" +
@@ -166,6 +168,22 @@ public class ShadowRouteService {
             }
 
             logger.debug("건물 검색 결과: " + results.size() + "개 건물");
+
+            // calculateBuildingShadows 메서드의 테이블 존재 확인 후에 추가
+            logger.debug("검색 좌표: startLat={}, startLng={}, endLat={}, endLng={}", startLat, startLng, endLat, endLng);
+
+            // 먼저 전체 건물 개수 확인
+            String countSql = "SELECT COUNT(*) FROM public.\"AL_D010_26_20250304\" WHERE \"A16\" > 5";
+            int totalBuildings = jdbcTemplate.queryForObject(countSql, Integer.class);
+            logger.debug("전체 건물 개수 (높이 > 5m): {}", totalBuildings);
+
+            // 검색 영역 내 모든 건물 개수 (높이 조건 없이)
+            String areaCountSql = "WITH search_area AS (" + boundingBoxSql + ") " +
+                    "SELECT COUNT(*) FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
+                    "WHERE ST_Intersects(b.geom, sa.search_area)";
+            int areaBuildings = jdbcTemplate.queryForObject(areaCountSql, Integer.class, startLng, startLat, endLng, endLat);
+            logger.debug("검색 영역 내 건물 개수: {}", areaBuildings);
+
 
             return shadowAreas;
         } catch (Exception e) {
