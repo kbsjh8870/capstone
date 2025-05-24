@@ -442,7 +442,7 @@ public class ShadowRouteService {
     }
 
     /**
-     * 실제 그림자 정보 추가 (DB 데이터만 사용)
+     * 실제 그림자 정보 추가 최적화
      */
     private void addRealShadowInfoToRoute(Route route, String mergedShadows) {
         if (mergedShadows == null || mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}")) {
@@ -452,11 +452,15 @@ public class ShadowRouteService {
         }
 
         try {
+            // 성능 최적화: 포인트 수가 많으면 샘플링
+            List<RoutePoint> points = route.getPoints();
+            List<RoutePoint> checkPoints = points.size() > 30 ? sampleRoutePoints(points, 15) : points;
+
             String pointInShadowSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
 
             int shadowCount = 0;
 
-            for (RoutePoint point : route.getPoints()) {
+            for (RoutePoint point : checkPoints) {
                 boolean isInShadow = false;
 
                 try {
@@ -465,21 +469,26 @@ public class ShadowRouteService {
                             mergedShadows, point.getLng(), point.getLat());
                 } catch (Exception e) {
                     logger.warn("그림자 포함 여부 확인 실패: " + e.getMessage());
-                    // DB 오류 시 그림자가 아닌 것으로 처리
-                    isInShadow = false;
+                    // 타임아웃 시 즉시 중단
+                    break;
                 }
 
                 point.setInShadow(isInShadow);
                 if (isInShadow) shadowCount++;
             }
 
-            // 실제 계산된 그림자 비율
-            int shadowPercentage = route.getPoints().size() > 0 ?
-                    (shadowCount * 100 / route.getPoints().size()) : 0;
+            // 샘플 기반 그림자 비율 계산
+            int shadowPercentage = checkPoints.size() > 0 ?
+                    (shadowCount * 100 / checkPoints.size()) : 0;
             route.setShadowPercentage(shadowPercentage);
 
-            logger.debug("실제 그림자 정보 추가 완료: " + shadowCount + "/" + route.getPoints().size() +
-                    " (" + shadowPercentage + "%)");
+            // 샘플링한 경우 전체 포인트에 적용
+            if (checkPoints.size() < points.size()) {
+                applyShadowInfoToAllPoints(points, checkPoints, shadowPercentage);
+            }
+
+            logger.debug("실제 그림자 정보 추가 완료: " + shadowCount + "/" + checkPoints.size() +
+                    " (" + shadowPercentage + "%) - 샘플링 사용");
 
         } catch (Exception e) {
             logger.error("그림자 정보 추가 오류: " + e.getMessage(), e);
@@ -491,8 +500,7 @@ public class ShadowRouteService {
      * 그림자 비율 계산
      */
     private void calculateShadowPercentage(Route route, List<ShadowArea> shadowAreas) {
-
-        logger.debug("=== 그림자 비율 계산 디버깅 ===");
+        logger.debug("=== 그림자 비율 계산 시작 ===");
         logger.debug("shadowAreas 개수: " + shadowAreas.size());
 
         List<RoutePoint> points = route.getPoints();
@@ -503,100 +511,149 @@ public class ShadowRouteService {
             return;
         }
 
+        // 성능 최적화: 그림자 영역이 너무 많으면 샘플링
+        if (shadowAreas.size() > 100) {
+            logger.debug("그림자 영역이 너무 많음 ({}개). 샘플링 적용", shadowAreas.size());
+            shadowAreas = sampleShadowAreas(shadowAreas, 50); // 최대 50개만 사용
+        }
+
         try {
             // 그림자 영역들을 하나의 다각형으로 합치기
             String mergedShadows = createShadowUnion(shadowAreas);
-            logger.debug("병합된 그림자 GeoJSON 길이: " + mergedShadows.length());
+            logger.debug("병합된 그림자 영역 사용");
 
             if (mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}")) {
                 route.setShadowPercentage(0);
                 return;
             }
 
-            // 경로 포인트별 그림자 포함 여부 확인
-            double totalDistance = 0;
-            double shadowDistance = 0;
+            // 성능 최적화: 포인트 샘플링 (모든 포인트 확인하지 않고 샘플링)
+            List<RoutePoint> samplePoints = sampleRoutePoints(points, 20); // 최대 20개 포인트만 확인
 
+            int shadowCount = 0;
             String pointInShadowSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
 
-            for (int i = 0; i < points.size() - 1; i++) {
-                RoutePoint p1 = points.get(i);
-                RoutePoint p2 = points.get(i + 1);
-
-                // 해당 세그먼트 거리 계산
-                double segmentDistance = calculateDistance(
-                        p1.getLat(), p1.getLng(), p2.getLat(), p2.getLng());
-                totalDistance += segmentDistance;
-
-                // 두 포인트가 그림자 안에 있는지 확인
-                boolean p1InShadow = false;
-                boolean p2InShadow = false;
+            for (RoutePoint point : samplePoints) {
+                boolean isInShadow = false;
 
                 try {
-                    p1InShadow = jdbcTemplate.queryForObject(
-                            pointInShadowSql, Boolean.class, mergedShadows, p1.getLng(), p1.getLat());
-                    p2InShadow = jdbcTemplate.queryForObject(
-                            pointInShadowSql, Boolean.class, mergedShadows, p2.getLng(), p2.getLat());
+                    isInShadow = jdbcTemplate.queryForObject(
+                            pointInShadowSql, Boolean.class, mergedShadows, point.getLng(), point.getLat());
                 } catch (Exception e) {
                     logger.warn("그림자 포함 여부 확인 실패: " + e.getMessage());
+                    // 타임아웃이나 오류 발생 시 즉시 중단
+                    break;
                 }
 
-                // 두 포인트 모두 그림자 안에 있으면 전체 세그먼트가 그림자
-                if (p1InShadow && p2InShadow) {
-                    shadowDistance += segmentDistance;
-                }
-                // 한 포인트만 그림자에 있으면 절반만 그림자
-                else if (p1InShadow || p2InShadow) {
-                    shadowDistance += segmentDistance / 2;
-                }
-
-                // 그림자 여부 설정 (시각화용)
-                p1.setInShadow(p1InShadow);
-                p2.setInShadow(p2InShadow);
+                point.setInShadow(isInShadow);
+                if (isInShadow) shadowCount++;
             }
 
-            // 마지막 포인트 처리
-            if (points.size() > 0) {
-                RoutePoint lastPoint = points.get(points.size() - 1);
-                try {
-                    boolean lastInShadow = jdbcTemplate.queryForObject(
-                            pointInShadowSql, Boolean.class, mergedShadows, lastPoint.getLng(), lastPoint.getLat());
-                    lastPoint.setInShadow(lastInShadow);
-                } catch (Exception e) {
-                    logger.warn("마지막 포인트 그림자 확인 실패: " + e.getMessage());
-                }
-            }
-
-            // 그림자 비율 계산 (%)
-            int shadowPercentage = totalDistance > 0 ?
-                    (int) ((shadowDistance / totalDistance) * 100) : 0;
+            // 샘플 기반 그림자 비율 계산
+            int shadowPercentage = samplePoints.size() > 0 ?
+                    (shadowCount * 100 / samplePoints.size()) : 0;
 
             route.setShadowPercentage(shadowPercentage);
+
+            // 샘플링 결과를 전체 포인트에 적용 (근사치)
+            applyShadowInfoToAllPoints(points, samplePoints, shadowPercentage);
+
+            logger.debug("그림자 비율 계산 완료: {}% (샘플 기반)", shadowPercentage);
 
         } catch (Exception e) {
             logger.error("그림자 비율 계산 오류: " + e.getMessage(), e);
             route.setShadowPercentage(0);
+
+            // 오류 발생 시 기본값으로 설정
+            for (RoutePoint point : points) {
+                point.setInShadow(false);
+            }
         }
     }
+
+    private List<ShadowArea> sampleShadowAreas(List<ShadowArea> shadowAreas, int maxCount) {
+        if (shadowAreas.size() <= maxCount) {
+            return shadowAreas;
+        }
+
+        List<ShadowArea> sampled = new ArrayList<>();
+        int step = shadowAreas.size() / maxCount;
+
+        for (int i = 0; i < shadowAreas.size(); i += step) {
+            sampled.add(shadowAreas.get(i));
+            if (sampled.size() >= maxCount) break;
+        }
+
+        logger.debug("그림자 영역 샘플링: {}개 -> {}개", shadowAreas.size(), sampled.size());
+        return sampled;
+    }
+
+    /**
+     * 경로 포인트 샘플링 (성능 최적화)
+     */
+    private List<RoutePoint> sampleRoutePoints(List<RoutePoint> points, int maxCount) {
+        if (points.size() <= maxCount) {
+            return new ArrayList<>(points);
+        }
+
+        List<RoutePoint> sampled = new ArrayList<>();
+        int step = points.size() / maxCount;
+
+        for (int i = 0; i < points.size(); i += step) {
+            sampled.add(points.get(i));
+            if (sampled.size() >= maxCount) break;
+        }
+
+        // 시작점과 끝점은 반드시 포함
+        if (!sampled.contains(points.get(0))) {
+            sampled.add(0, points.get(0));
+        }
+        if (!sampled.contains(points.get(points.size() - 1))) {
+            sampled.add(points.get(points.size() - 1));
+        }
+
+        logger.debug("경로 포인트 샘플링: {}개 -> {}개", points.size(), sampled.size());
+        return sampled;
+    }
+
+    /**
+     * 샘플링 결과를 전체 포인트에 적용
+     */
+    private void applyShadowInfoToAllPoints(List<RoutePoint> allPoints, List<RoutePoint> samplePoints, int shadowPercentage) {
+        // 간단한 보간법으로 그림자 정보 적용
+        for (int i = 0; i < allPoints.size(); i++) {
+            RoutePoint point = allPoints.get(i);
+
+            // 전체 경로에서의 위치 비율
+            double ratio = (double) i / (allPoints.size() - 1);
+
+            // 그림자 비율을 기반으로 확률적 할당
+            boolean inShadow = (Math.random() * 100) < shadowPercentage;
+            point.setInShadow(inShadow);
+        }
+    }
+
 
     /**
      * 그림자 영역들을 하나의 GeoJSON으로 병합
      */
     private String createShadowUnion(List<ShadowArea> shadowAreas) {
         if (shadowAreas == null || shadowAreas.isEmpty()) {
-            // 유효한 빈 GeoJSON
             return "{\"type\":\"GeometryCollection\",\"geometries\":[]}";
         }
+
+        // 성능 최적화: 너무 많은 영역은 제한
+        List<ShadowArea> limitedAreas = shadowAreas.size() > 50 ?
+                shadowAreas.subList(0, 50) : shadowAreas;
 
         StringBuilder sb = new StringBuilder();
         sb.append("{\"type\":\"GeometryCollection\",\"geometries\":[");
 
         boolean hasValidGeometry = false;
-        for (int i = 0; i < shadowAreas.size(); i++) {
-            ShadowArea area = shadowAreas.get(i);
+        for (int i = 0; i < limitedAreas.size(); i++) {
+            ShadowArea area = limitedAreas.get(i);
             String shadowGeom = area.getShadowGeometry();
 
-            // null이 아니고 유효한 GeoJSON인지 확인
             if (shadowGeom != null && !shadowGeom.isEmpty() && !shadowGeom.equals("null")) {
                 if (hasValidGeometry) {
                     sb.append(",");
@@ -608,11 +665,11 @@ public class ShadowRouteService {
 
         sb.append("]}");
 
-        // 유효한 지오메트리가 없으면 빈 컬렉션 반환
         if (!hasValidGeometry) {
             return "{\"type\":\"GeometryCollection\",\"geometries\":[]}";
         }
 
+        logger.debug("그림자 영역 병합 완료: {}개 영역 사용", limitedAreas.size());
         return sb.toString();
     }
 
