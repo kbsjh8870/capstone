@@ -134,6 +134,49 @@
             android:elevation="4dp"
             android:visibility="gone" />
 
+    <!-- 그림자 구간 범례 -->
+    <LinearLayout
+            android:id="@+id/shadow_legend"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_below="@id/tv_route_info"
+            android:layout_centerHorizontal="true"
+            android:orientation="horizontal"
+            android:background="#CCFFFFFF"
+            android:padding="8dp"
+            android:elevation="4dp"
+            android:visibility="gone">
+
+        <View
+                android:id="@+id/legend_shadow"
+                android:layout_width="20dp"
+                android:layout_height="4dp"
+                android:background="#424242"
+                android:layout_gravity="center_vertical" />
+
+        <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="그림자 구간"
+                android:textSize="12sp"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="12dp" />
+
+        <View
+                android:id="@+id/legend_sunny"
+                android:layout_width="20dp"
+                android:layout_height="4dp"
+                android:background="#FF5722"
+                android:layout_gravity="center_vertical" />
+
+        <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="햇빛 구간"
+                android:textSize="12sp"
+                android:layout_marginStart="4dp" />
+    </LinearLayout>
+
     <!-- 경로 선택 버튼 컨테이너 -->
     <LinearLayout
             android:id="@+id/route_button_container"

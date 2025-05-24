@@ -25,6 +25,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.example.front.R;
 import com.example.front.adapter.POIAdapter;
+import com.example.front.model.RoutePoint;
 import com.skt.Tmap.*;
 import com.skt.Tmap.poi_item.TMapPOIItem;
 import org.json.JSONArray;
@@ -72,6 +73,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     private static final float ROUTE_LINE_WIDTH = 5.0f;
 
     private List<TMapPolyLine> routes = new ArrayList<>();
+    private List<TMapPolyLine> shadowSegments = new ArrayList<>(); // 그림자 구간 폴리라인 리스트
     private Map<String, TMapPolygon> buildingPolygons = new HashMap<>();
     private Map<String, TMapPolygon> shadowPolygons = new HashMap<>();
     private LocalDateTime selectedDateTime = LocalDateTime.now();
@@ -81,6 +83,8 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     private static final int COLOR_BASIC_ROUTE = Color.parseColor("#2196F3");  // 파란색 - 기본 경로
     private static final int COLOR_AVOID_SHADOW = Color.parseColor("#FF5722"); // 주황색 - 그림자 회피 경로
     private static final int COLOR_FOLLOW_SHADOW = Color.parseColor("#9C27B0"); // 보라색 - 그림자 따라가기 경로
+    private static final int COLOR_SHADOW_SEGMENT = Color.parseColor("#424242"); // 어두운 회색 - 그림자 구간
+    private static final int COLOR_SUNNY_SEGMENT = Color.parseColor("#FFC107"); // 노란색 - 햇빛 구간
 
     private boolean isInitialRouteDisplay = true;
 
@@ -147,8 +151,8 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
+                conn.setConnectTimeout(30000);
+                conn.setReadTimeout(30000);
 
                 int responseCode = conn.getResponseCode();
                 Log.d(TAG, "응답 코드: " + responseCode);
@@ -632,6 +636,12 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         }
         routes.clear();
 
+        // 그림자 구간 폴리라인 제거
+        for (TMapPolyLine shadowSegment : shadowSegments) {
+        tMapView.removeTMapPolyLine(shadowSegment.getID());
+        }
+        shadowSegments.clear();
+
         // 건물 폴리곤 제거
         for (String key : buildingPolygons.keySet()) {
             tMapView.removeTMapPolygon(key);
@@ -719,19 +729,43 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             }
 
             // 경로 좌표 추가
-            for (int i = 0; i < pointsArray.length(); i++) {
-                JSONObject point = pointsArray.getJSONObject(i);
-                double lat = point.getDouble("lat");
-                double lng = point.getDouble("lng");
-                boolean inShadow = point.optBoolean("inShadow", false);
+            if (!isBasicRoute) {
+                // 그림자 경로인 경우 구간별로 분할하여 표시
+                List<RoutePoint> routePoints = new ArrayList<>();
+                
+                // 먼저 모든 포인트를 RoutePoint 리스트로 변환
+                for (int i = 0; i < pointsArray.length(); i++) {
+                    JSONObject point = pointsArray.getJSONObject(i);
+                    RoutePoint rp = new RoutePoint();
+                    rp.setLat(point.getDouble("lat"));
+                    rp.setLng(point.getDouble("lng"));
+                    
+                    // inShadow 필드 확인
+                    boolean inShadow = point.optBoolean("inShadow", false);
+                    rp.setInShadow(inShadow);
+                    
+                    routePoints.add(rp);
+                    
+                    // 전체 포인트 리스트에도 추가
+                    allPoints.add(new TMapPoint(rp.getLat(), rp.getLng()));
+                }
+                
+                // 그림자 구간별로 경로 분할하여 표시
+                displaySegmentedRoute(routePoints, "route_" + r, routeObj.getBoolean("avoidShadow"));
+            } else {
+                // 기본 경로는 단일 색상으로 표시
+                for (int i = 0; i < pointsArray.length(); i++) {
+                    JSONObject point = pointsArray.getJSONObject(i);
+                    double lat = point.getDouble("lat");
+                    double lng = point.getDouble("lng");
 
-                TMapPoint tMapPoint = new TMapPoint(lat, lng);
-                polyLine.addLinePoint(tMapPoint);
-                allPoints.add(tMapPoint);
+                    TMapPoint tMapPoint = new TMapPoint(lat, lng);
+                    polyLine.addLinePoint(tMapPoint);
+                    allPoints.add(tMapPoint);
+                }
+                // 경로를 routes 리스트에 추가 (지도에는 아직 추가하지 않음)
+                routes.add(polyLine);
             }
-
-            // 경로를 routes 리스트에 추가 (지도에는 아직 추가하지 않음)
-            routes.add(polyLine);
         }
 
         // 모든 경로가 화면에 표시되도록 확대/축소 레벨 조정
@@ -776,36 +810,24 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             RadioButton radioAvoidShadow = findViewById(R.id.radio_avoid_shadow);
             radioAvoidShadow.setChecked(true);
 
-            // 그림자 경로만 표시 (기본 경로는 표시하지 않음)
-            TMapPolyLine shadowRoute = routes.get(1);
-            shadowRoute.setLineWidth(8.0f);
-            tMapView.addTMapPolyLine(shadowRoute.getID(), shadowRoute);
-            currentRoute = shadowRoute;
+            // 그림자 경로 세그먼트들 표시
+            displayShadowRouteSegments();
 
             // 경로 정보 텍스트 업데이트
-            double distanceKm = shadowRoute.getDistance() / 1000.0;
-            int timeMinutes = (int) (shadowRoute.getDistance() / 67.0);
-            String routeInfo = String.format("그림자 X 경로: %.1f km | %d분", distanceKm, timeMinutes);
-            tvRouteInfo.setText(routeInfo);
+            calculateAndDisplayRouteInfo("그림자 X 경로");
 
             //Toast.makeText(this, "그림자 X", Toast.LENGTH_SHORT).show();
         } else if (!avoidShadow && routes.size() > 1) {
-            // 그림자 따라가기 경로 선택 - 이 부분 추가 필요
+            // 그림자 따라가기 경로 선택
             RadioGroup shadowOptions = findViewById(R.id.radio_group_shadow);
             RadioButton radioFollowShadow = findViewById(R.id.radio_follow_shadow);
             radioFollowShadow.setChecked(true);
 
-            // 그림자 경로만 표시 (기본 경로는 표시하지 않음)
-            TMapPolyLine shadowRoute = routes.get(1);
-            shadowRoute.setLineWidth(8.0f);
-            tMapView.addTMapPolyLine(shadowRoute.getID(), shadowRoute);
-            currentRoute = shadowRoute;
+            // 그림자 경로 세그먼트들 표시
+            displayShadowRouteSegments();
 
             // 경로 정보 텍스트 업데이트
-            double distanceKm = shadowRoute.getDistance() / 1000.0;
-            int timeMinutes = (int) (shadowRoute.getDistance() / 67.0);
-            String routeInfo = String.format("그림자 O 경로: %.1f km | %d분", distanceKm, timeMinutes);
-            tvRouteInfo.setText(routeInfo);
+            calculateAndDisplayRouteInfo("그림자 O 경로");
 
             //Toast.makeText(this, "그림자 O", Toast.LENGTH_SHORT).show();
         }
@@ -914,10 +936,77 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     }*/
 
     /**
-     * 그림자 영역 표시
+     * 경로상의 그림자 구간을 시각적으로 표시
+     */
+    private void addShadowSegments(JSONArray pointsArray) {
+        try {
+            List<TMapPoint> shadowPoints = new ArrayList<>();
+            List<TMapPoint> currentShadowSegment = new ArrayList<>();
+            int shadowSegmentCount = 0;
+
+            // 경로 포인트를 순회하며 그림자 구간 찾기
+            for (int i = 0; i < pointsArray.length(); i++) {
+                JSONObject point = pointsArray.getJSONObject(i);
+                double lat = point.getDouble("lat");
+                double lng = point.getDouble("lng");
+                boolean inShadow = point.optBoolean("inShadow", false);
+
+                TMapPoint tMapPoint = new TMapPoint(lat, lng);
+
+                if (inShadow) {
+                    // 그림자 구간에 포인트 추가
+                    currentShadowSegment.add(tMapPoint);
+                } else {
+                    // 그림자 구간이 끝나면 폴리라인 생성
+                    if (currentShadowSegment.size() >= 2) {
+                        createShadowSegmentPolyLine(currentShadowSegment, shadowSegmentCount++);
+                    }
+                    currentShadowSegment.clear();
+                }
+            }
+
+            // 마지막 그림자 구간 처리
+            if (currentShadowSegment.size() >= 2) {
+                createShadowSegmentPolyLine(currentShadowSegment, shadowSegmentCount);
+            }
+
+            Log.d(TAG, "그림자 구간 생성 완료: " + shadowSegments.size() + "개 구간");
+
+        } catch (Exception e) {
+            Log.e(TAG, "그림자 구간 생성 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 그림자 구간 폴리라인 생성
+     */
+    private void createShadowSegmentPolyLine(List<TMapPoint> points, int segmentIndex) {
+        if (points.size() < 2) return;
+
+        TMapPolyLine shadowSegment = new TMapPolyLine();
+        shadowSegment.setID("shadow_segment_" + segmentIndex + "_" + System.currentTimeMillis());
+        
+        // 그림자 구간 스타일 설정 - 회색 반투명
+        shadowSegment.setLineColor(Color.argb(180, 100, 100, 100)); // 회색 반투명
+        shadowSegment.setLineWidth(8.0f); // 기본 경로보다 두껏게
+
+        // 그림자 구간 포인트 추가
+        for (TMapPoint point : points) {
+            shadowSegment.addLinePoint(point);
+        }
+
+        // 지도에 추가
+        tMapView.addTMapPolyLine(shadowSegment.getID(), shadowSegment);
+        shadowSegments.add(shadowSegment);
+
+        Log.d(TAG, "그림자 구간 추가: " + shadowSegment.getID() + ", 포인트 수: " + points.size());
+    }
+
+    /**
+     * 그림자 영역 표시 ( 건물이 직접적으로 검은색으로 표시되서 주석 처리함 )
      */
     private void displayShadowAreas(JSONArray shadowAreasArray) throws JSONException {
-        for (int i = 0; i < shadowAreasArray.length(); i++) {
+        /*for (int i = 0; i < shadowAreasArray.length(); i++) {
             JSONObject shadowArea = shadowAreasArray.getJSONObject(i);
             long id = shadowArea.getLong("id");
 
@@ -938,7 +1027,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                         Color.argb(40, 0, 0, 0), // 반투명 검은색
                         shadowPolygons);
             }
-        }
+        }*/
     }
 
     /**
@@ -1188,6 +1277,16 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             }
             routes.clear();
 
+            // 그림자 구간 폴리라인 제거
+            for (TMapPolyLine shadowSegment : shadowSegments) {
+                try {
+                    tMapView.removeTMapPolyLine(shadowSegment.getID());
+                } catch (Exception e) {
+                    Log.e(TAG, "그림자 구간 제거 오류: " + e.getMessage());
+                }
+            }
+            shadowSegments.clear();
+
             // 더 강력한 방법 시도 - 경로 초기화
             if (currentRoute != null) {
                 tMapView.removeTMapPath();
@@ -1210,6 +1309,10 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
             // 경로 정보 텍스트 숨기기
             tvRouteInfo.setVisibility(View.GONE);
+            
+            // 범례 숨기기
+            LinearLayout shadowLegend = findViewById(R.id.shadow_legend);
+            shadowLegend.setVisibility(View.GONE);
 
             // 경로 버튼 컨테이너 숨기기
             LinearLayout routeButtonContainer = findViewById(R.id.route_button_container);
@@ -1250,6 +1353,182 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     protected void onResume() {
         super.onResume();
         // TODO: 앱이 전면에 나타날 때 경로 초기화가 필요하면? 추가
+    }
+
+    /**
+     * 그림자 경로 세그먼트들을 지도에 표시
+     */
+    private void displayShadowRouteSegments() {
+        // 기본 경로를 제외한 모든 세그먼트 표시
+        for (int i = 1; i < routes.size(); i++) {
+            TMapPolyLine segment = routes.get(i);
+            tMapView.addTMapPolyLine(segment.getID(), segment);
+        }
+        
+        // 범례 표시 및 색상 업데이트
+        LinearLayout shadowLegend = findViewById(R.id.shadow_legend);
+        shadowLegend.setVisibility(View.VISIBLE);
+        
+        // 범례 색상 업데이트
+        View legendSunny = findViewById(R.id.legend_sunny);
+        if (avoidShadow) {
+            legendSunny.setBackgroundColor(COLOR_AVOID_SHADOW); // 주황색
+        } else {
+            legendSunny.setBackgroundColor(COLOR_FOLLOW_SHADOW); // 보라색
+        }
+    }
+    
+    /**
+     * 경로 정보 계산 및 표시
+     */
+    private void calculateAndDisplayRouteInfo(String routeType) {
+        double totalDistance = 0;
+        
+        // 기본 경로를 제외한 모든 세그먼트의 거리 합산
+        for (int i = 1; i < routes.size(); i++) {
+            TMapPolyLine segment = routes.get(i);
+            
+            // 세그먼트 ID로 그림자 구간 판단
+            if (segment.getID().contains("segment")) {
+                // 거리 계산 - TMapPolyLine의 거리 계산 메서드 사용
+                ArrayList<TMapPoint> linePoints = segment.getLinePoint();
+                if (linePoints != null && linePoints.size() > 1) {
+                    for (int j = 0; j < linePoints.size() - 1; j++) {
+                        TMapPoint p1 = linePoints.get(j);
+                        TMapPoint p2 = linePoints.get(j + 1);
+                        // 두 점 사이의 거리 계산 (Haversine 공식)
+                        double lat1 = p1.getLatitude();
+                        double lon1 = p1.getLongitude();
+                        double lat2 = p2.getLatitude();
+                        double lon2 = p2.getLongitude();
+                        
+                        double R = 6371000; // 지구 반경 (미터)
+                        double dLat = Math.toRadians(lat2 - lat1);
+                        double dLon = Math.toRadians(lon2 - lon1);
+                        double a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                                   Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                                   Math.sin(dLon/2) * Math.sin(dLon/2);
+                        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                        double distance = R * c;
+                        
+                        totalDistance += distance;
+                    }
+                }
+            }
+        }
+        
+
+        double distanceKm = totalDistance / 1000.0;
+        int timeMinutes = (int) (totalDistance / 67.0);
+        
+        String routeInfo = String.format("%s: %.1f km | %d분", 
+                routeType, distanceKm, timeMinutes);
+        tvRouteInfo.setText(routeInfo);
+        tvRouteInfo.setVisibility(View.VISIBLE);
+    }
+
+    /**
+     * 그림자 구간별로 경로를 분할하여 표시
+     */
+    private void displaySegmentedRoute(List<RoutePoint> routePoints, String routeId, boolean avoidShadow) {
+
+        if (routePoints == null || routePoints.size() < 2) {
+            return;
+        }
+        
+        // 구간별로 분할된 경로 세그먼트
+        List<TMapPolyLine> segments = new ArrayList<>();
+        
+        // 현재 구간의 시작 인덱스
+        int segmentStart = 0;
+        boolean currentInShadow = routePoints.get(0).isInShadow();
+        
+        // 경로를 순회하면서 그림자 상태가 바뀌는 지점에서 분할
+        for (int i = 1; i <= routePoints.size(); i++) {
+            boolean nextInShadow = (i < routePoints.size()) ? routePoints.get(i).isInShadow() : !currentInShadow;
+            
+            // 그림자 상태가 바뀌거나 끝에 도달한 경우
+            if (nextInShadow != currentInShadow || i == routePoints.size()) {
+                // 세그먼트 생성
+                TMapPolyLine segment = new TMapPolyLine();
+                String segmentId = routeId + "_segment_" + segments.size() + 
+                                  (currentInShadow ? "_shadow" : "_sunny");
+                segment.setID(segmentId);
+                
+                // 세그먼트 색상 설정 - 그림자 여부에 따라 다르게 표시
+                if (currentInShadow) {
+                    // 그림자 구간 - 어두운 회색
+                    segment.setLineColor(COLOR_SHADOW_SEGMENT);
+                    segment.setLineWidth(10.0f);
+                    segment.setLineAlpha(200); // 약간 투명하게
+                } else {
+                    // 햇빛 구간 - 기본 경로 색상 유지
+                    if (avoidShadow) {
+                        segment.setLineColor(COLOR_AVOID_SHADOW); // 주황색
+                    } else {
+                        segment.setLineColor(COLOR_FOLLOW_SHADOW); // 보라색
+                    }
+                    segment.setLineWidth(10.0f);
+                }
+                
+                // 세그먼트에 포인트 추가
+                for (int j = segmentStart; j <= Math.min(i, routePoints.size() - 1); j++) {
+                    RoutePoint point = routePoints.get(j);
+                    segment.addLinePoint(new TMapPoint(point.getLat(), point.getLng()));
+                }
+                
+                Log.d(TAG, "세그먼트 포인트 수: " + segment.getLinePoint().size());
+                
+                segments.add(segment);
+                routes.add(segment);
+                
+                // 다음 세그먼트를 위한 설정
+                if (i < routePoints.size()) {
+                    segmentStart = i - 1; // 연결성을 위해 마지막 포인트 포함
+                    currentInShadow = nextInShadow;
+                }
+            }
+        }
+        
+        Log.d(TAG, "총 세그먼트 수: " + segments.size());
+        
+        // 그림자 구간에 마커 추가 (선택적)
+        addShadowMarkers(routePoints, avoidShadow);
+    }
+    
+    /**
+     * 그림자 구간 시작/끝 지점에 마커 추가
+     */
+    private void addShadowMarkers(List<RoutePoint> routePoints, boolean avoidShadow) {
+        if (routePoints.size() < 2) return;
+        
+        boolean previousInShadow = routePoints.get(0).isInShadow();
+        
+        for (int i = 1; i < routePoints.size() - 1; i++) {
+            boolean currentInShadow = routePoints.get(i).isInShadow();
+            
+            // 그림자 상태가 바뀌는 지점에 마커 추가
+            if (currentInShadow != previousInShadow) {
+                RoutePoint point = routePoints.get(i);
+                TMapMarkerItem marker = new TMapMarkerItem();
+                marker.setTMapPoint(new TMapPoint(point.getLat(), point.getLng()));
+                marker.setVisible(TMapMarkerItem.VISIBLE);
+                marker.setCanShowCallout(true);
+                
+                if (currentInShadow) {
+                    marker.setCalloutTitle("그림자 구간 시작");
+                    // 그림자 시작 마커 아이콘 설정
+                } else {
+                    marker.setCalloutTitle("햇빛 구간 시작");
+                    // 햇빛 시작 마커 아이콘 설정
+                }
+                
+                marker.setAutoCalloutVisible(false);
+                tMapView.addMarkerItem("shadow_marker_" + i, marker);
+            }
+            
+            previousInShadow = currentInShadow;
+        }
     }
 
     @Override
