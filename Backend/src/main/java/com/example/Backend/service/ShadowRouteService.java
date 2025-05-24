@@ -353,18 +353,7 @@ public class ShadowRouteService {
         List<RoutePoint> points = route.getPoints();
         
         if (shadowAreas.isEmpty()) {
-            // 그림자 영역이 없을 때 테스트 데이터 생성
-            logger.warn("그림자 영역 데이터 없음 - 테스트 데이터 생성");
-            
-            // 10개 포인트마다 그림자 상태 변경 (테스트용)
-            for (int i = 0; i < points.size(); i++) {
-                RoutePoint point = points.get(i);
-                boolean inShadow = (i / 10) % 2 == 1;
-                point.setInShadow(inShadow);
-            }
-            
-            // 대략적인 그림자 비율 설정
-            route.setShadowPercentage(route.isAvoidShadow() ? 20 : 70);
+            route.setShadowPercentage(0);
             return;
         }
 
@@ -439,8 +428,7 @@ public class ShadowRouteService {
 
         } catch (Exception e) {
             logger.error("그림자 비율 계산 오류: " + e.getMessage(), e);
-            // 오류 시 기본 추정치 사용
-            route.setShadowPercentage(route.isAvoidShadow() ? 15 : 75);
+            route.setShadowPercentage(0);
         }
     }
 
