@@ -150,109 +150,156 @@ public class ShadowRouteService {
                                                       SunPosition sunPos) {
 
         try {
-            // 1. 태양 위치 로깅
-            logger.debug("=== 건물 그림자 계산 시작 ===");
+            logger.debug("=== Java 기반 건물 그림자 계산 시작 ===");
             logger.debug("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
-            logger.debug("경로 좌표: 시작({}, {}), 끝({}, {})", startLat, startLng, endLat, endLng);
 
-            // 2. 테이블 존재 여부 확인
-            String checkTableSql = "SELECT EXISTS (SELECT FROM information_schema.tables " +
-                    "WHERE table_schema = 'public' AND table_name = 'AL_D010_26_20250304')";
-            boolean tableExists = jdbcTemplate.queryForObject(checkTableSql, Boolean.class);
-            logger.debug("건물 테이블 존재 여부: {}", tableExists);
-
-            if (!tableExists) {
-                logger.warn("건물 데이터 테이블이 존재하지 않습니다.");
+            // 1. 태양 고도가 너무 낮으면 그림자 계산 생략
+            if (sunPos.getAltitude() < 5.0) {
+                logger.debug("태양 고도가 너무 낮음 ({}도). 그림자 계산 생략", sunPos.getAltitude());
                 return new ArrayList<>();
             }
 
-            // 3. 해당 지역의 건물 개수 먼저 확인
-            String countSql = "SELECT COUNT(*) FROM public.\"AL_D010_26_20250304\" b " +
-                    "WHERE ST_DWithin(b.geom, ST_MakeLine(" +
-                    "ST_SetSRID(ST_MakePoint(?, ?), 4326), " +
-                    "ST_SetSRID(ST_MakePoint(?, ?), 4326)), 0.003)";
-
-            Integer buildingCount = jdbcTemplate.queryForObject(countSql, Integer.class,
-                    startLng, startLat, endLng, endLat);
-            logger.debug("검색 범위 내 건물 개수: {}개", buildingCount);
-
-            if (buildingCount == null || buildingCount == 0) {
-                logger.warn("해당 지역에 건물 데이터가 없습니다.");
-                return new ArrayList<>();
-            }
-
-            // 4. 높이 정보가 있는 건물 개수 확인
-            String heightCountSql = "SELECT COUNT(*) FROM public.\"AL_D010_26_20250304\" b " +
-                    "WHERE ST_DWithin(b.geom, ST_MakeLine(" +
-                    "ST_SetSRID(ST_MakePoint(?, ?), 4326), " +
-                    "ST_SetSRID(ST_MakePoint(?, ?), 4326)), 0.003) " +
-                    "AND b.\"A16\" IS NOT NULL AND b.\"A16\" > 5";
-
-            Integer heightBuildingCount = jdbcTemplate.queryForObject(heightCountSql, Integer.class,
-                    startLng, startLat, endLng, endLat);
-            logger.debug("높이 정보가 있는 건물 개수: {}개 (5m 이상)", heightBuildingCount);
-
-            if (heightBuildingCount == null || heightBuildingCount == 0) {
-                logger.warn("해당 지역에 유효한 높이 정보를 가진 건물이 없습니다.");
-                return new ArrayList<>();
-            }
-
-            // 5. calculate_shadow_geometry 함수 존재 여부 확인
-            String checkFunctionSql = "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'calculate_shadow_geometry')";
-            boolean functionExists = jdbcTemplate.queryForObject(checkFunctionSql, Boolean.class);
-            logger.debug("그림자 계산 함수 존재 여부: {}", functionExists);
-
-            if (!functionExists) {
-                logger.error("calculate_shadow_geometry 함수가 존재하지 않습니다.");
-                return new ArrayList<>();
-            }
-
-            // 6. 실제 그림자 계산 쿼리 실행
-            String shadowSql = "SELECT b.id, b.\"A16\" as height, " +
+            // 2. 경로 주변 건물 조회 (PostgreSQL 그림자 함수 사용하지 않음)
+            String buildingSql = "SELECT b.id, b.\"A16\" as height, " +
                     "ST_AsGeoJSON(b.geom) as building_geom, " +
-                    "ST_AsGeoJSON(calculate_shadow_geometry(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
+                    "ST_X(ST_Centroid(b.geom)) as center_lng, " +
+                    "ST_Y(ST_Centroid(b.geom)) as center_lat " +
                     "FROM public.\"AL_D010_26_20250304\" b " +
                     "WHERE ST_DWithin(b.geom, ST_MakeLine(" +
                     "ST_SetSRID(ST_MakePoint(?, ?), 4326), " +
                     "ST_SetSRID(ST_MakePoint(?, ?), 4326)), 0.003) " +
-                    "AND b.\"A16\" IS NOT NULL AND b.\"A16\" > 5 " +
-                    "LIMIT 10"; // 최대 10개만 조회해서 성능 확인
+                    "AND b.\"A16\" > 5 " +
+                    "LIMIT 20";
 
-            logger.debug("그림자 계산 쿼리 실행 중...");
-            long startTime = System.currentTimeMillis();
+            List<Map<String, Object>> buildingResults = jdbcTemplate.queryForList(
+                    buildingSql, startLng, startLat, endLng, endLat);
 
-            List<Map<String, Object>> results = jdbcTemplate.queryForList(
-                    shadowSql,
-                    sunPos.getAzimuth(), sunPos.getAltitude(),
-                    startLng, startLat, endLng, endLat);
+            logger.debug("주변 건물 조회 완료: {}개", buildingResults.size());
 
-            long endTime = System.currentTimeMillis();
-            logger.debug("쿼리 실행 시간: {}ms, 결과 개수: {}개", (endTime - startTime), results.size());
-
-            // 7. 결과 파싱
             List<ShadowArea> shadowAreas = new ArrayList<>();
-            for (Map<String, Object> row : results) {
-                try {
-                    ShadowArea area = new ShadowArea();
-                    area.setId(((Number) row.get("id")).longValue());
-                    area.setHeight(((Number) row.get("height")).doubleValue());
-                    area.setBuildingGeometry((String) row.get("building_geom"));
-                    area.setShadowGeometry((String) row.get("shadow_geom"));
-                    shadowAreas.add(area);
 
-                    logger.debug("건물 {}번: 높이={}m", area.getId(), area.getHeight());
+            for (Map<String, Object> row : buildingResults) {
+                try {
+                    long buildingId = ((Number) row.get("id")).longValue();
+                    double height = ((Number) row.get("height")).doubleValue();
+                    String buildingGeom = (String) row.get("building_geom");
+                    double centerLat = ((Number) row.get("center_lat")).doubleValue();
+                    double centerLng = ((Number) row.get("center_lng")).doubleValue();
+
+                    // 3. Java에서 간단한 그림자 계산
+                    String shadowGeom = calculateSimpleShadow(
+                            centerLat, centerLng, height, sunPos);
+
+                    if (shadowGeom != null) {
+                        ShadowArea area = new ShadowArea();
+                        area.setId(buildingId);
+                        area.setHeight(height);
+                        area.setBuildingGeometry(buildingGeom);
+                        area.setShadowGeometry(shadowGeom);
+                        shadowAreas.add(area);
+
+                        logger.debug("건물 {}번: 높이={}m, 그림자 계산 완료", buildingId, height);
+                    }
+
                 } catch (Exception e) {
-                    logger.warn("그림자 영역 파싱 오류: " + e.getMessage());
+                    logger.warn("건물 그림자 계산 실패: " + e.getMessage());
                 }
             }
 
-            logger.debug("건물 그림자 계산 완료: {}개 건물의 그림자 영역 생성", shadowAreas.size());
+            logger.debug("Java 기반 그림자 계산 완료: {}개 그림자 영역", shadowAreas.size());
             return shadowAreas;
 
         } catch (Exception e) {
-            logger.error("건물 그림자 계산 오류: " + e.getMessage(), e);
-            e.printStackTrace(); // 상세한 스택 트레이스 출력
+            logger.error("Java 그림자 계산 오류: " + e.getMessage(), e);
             return new ArrayList<>();
+        }
+    }
+
+    /**
+     * 간단한 그림자 계산 (원형 건물 가정)
+     */
+    private String calculateSimpleShadow(double buildingLat, double buildingLng,
+                                         double height, SunPosition sunPos) {
+        try {
+            // 1. 그림자 길이 계산
+            double shadowLength = height / Math.tan(Math.toRadians(sunPos.getAltitude()));
+
+            // 너무 긴 그림자는 제한 (500m)
+            shadowLength = Math.min(shadowLength, 500.0);
+
+            // 2. 그림자 방향 계산 (태양 반대 방향)
+            double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
+
+            // 3. 그림자 끝점 계산 (미터를 위도/경도로 변환)
+            double shadowEndLat = buildingLat +
+                    (shadowLength * Math.cos(Math.toRadians(shadowDirection))) / 111000.0;
+            double shadowEndLng = buildingLng +
+                    (shadowLength * Math.sin(Math.toRadians(shadowDirection))) /
+                            (111000.0 * Math.cos(Math.toRadians(buildingLat)));
+
+            // 4. 건물 주변 원형 영역 (반지름 10m)
+            double buildingRadius = 10.0 / 111000.0; // 10m를 도 단위로 변환
+
+            // 5. 그림자 영역을 원형으로 생성 (간단화)
+            double shadowRadius = Math.max(20.0, shadowLength * 0.2) / 111000.0;
+
+            // 6. GeoJSON 형식으로 원형 그림자 생성
+            StringBuilder geoJson = new StringBuilder();
+            geoJson.append("{\"type\":\"Polygon\",\"coordinates\":[[");
+
+            // 원형 그림자를 16각형으로 근사
+            for (int i = 0; i <= 16; i++) {
+                double angle = (i * 360.0 / 16.0);
+                double pointLat = shadowEndLat + shadowRadius * Math.cos(Math.toRadians(angle));
+                double pointLng = shadowEndLng + shadowRadius * Math.sin(Math.toRadians(angle));
+
+                geoJson.append("[").append(pointLng).append(",").append(pointLat).append("]");
+                if (i < 16) geoJson.append(",");
+            }
+
+            geoJson.append("]]}");
+
+            logger.debug("간단 그림자 계산: 길이={}m, 방향={}도, 중심=({}, {})",
+                    shadowLength, shadowDirection, shadowEndLat, shadowEndLng);
+
+            return geoJson.toString();
+
+        } catch (Exception e) {
+            logger.warn("간단 그림자 계산 실패: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 더 정확한 그림자 계산 (건물 형태 고려)
+     */
+    private String calculateAccurateShadow(String buildingGeom, double height, SunPosition sunPos) {
+        try {
+            // PostgreSQL에서 건물 경계점들 가져오기
+            String pointsSql = "SELECT ST_AsText(ST_Translate(" +
+                    "ST_GeomFromGeoJSON(?), " +
+                    "? * cos(radians(?)), " +  // X 이동
+                    "? * sin(radians(?))" +    // Y 이동
+                    ")) as shadow_geom";
+
+            // 그림자 길이와 방향 계산
+            double shadowLength = height / Math.tan(Math.toRadians(sunPos.getAltitude()));
+            double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
+
+            // 미터를 도 단위로 변환
+            double offsetX = (shadowLength / 111000.0) * Math.cos(Math.toRadians(shadowDirection));
+            double offsetY = (shadowLength / 111000.0) * Math.sin(Math.toRadians(shadowDirection));
+
+            String shadowWKT = jdbcTemplate.queryForObject(pointsSql, String.class,
+                    buildingGeom, offsetX, shadowDirection, offsetY, shadowDirection);
+
+            // WKT를 GeoJSON으로 변환
+            String geoJsonSql = "SELECT ST_AsGeoJSON(ST_GeomFromText(?))";
+            return jdbcTemplate.queryForObject(geoJsonSql, String.class, shadowWKT);
+
+        } catch (Exception e) {
+            logger.warn("정확한 그림자 계산 실패: " + e.getMessage());
+            return null;
         }
     }
 
