@@ -98,7 +98,7 @@ public class ShadowRouteService {
 
             // 그림자 비율 계산 - 실제 shadowAreas 데이터가 있을 때만
             if (!shadowAreas.isEmpty()) {
-                calculateShadowPercentage(shadowRoute, shadowAreas);
+                calculateShadowPercentageRelaxed(shadowRoute, shadowAreas);
             }
 
             routes.add(shadowRoute);
@@ -224,30 +224,50 @@ public class ShadowRouteService {
             // 1. 그림자 길이 계산
             double shadowLength = height / Math.tan(Math.toRadians(sunPos.getAltitude()));
 
-            // 너무 긴 그림자는 제한 (500m)
-            shadowLength = Math.min(shadowLength, 500.0);
+            // 너무 긴 그림자는 제한 (200m)
+            shadowLength = Math.min(shadowLength, 200.0);
 
             // 2. 그림자 방향 계산 (태양 반대 방향)
             double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
 
-            // 3. 그림자 끝점 계산 (미터를 위도/경도로 변환)
+            // *** 방향 디버깅 로그 추가 ***
+            logger.debug("건물 위치: ({}, {}), 태양 방위각: {}도, 그림자 방향: {}도",
+                    buildingLat, buildingLng, sunPos.getAzimuth(), shadowDirection);
+
+            // 3. 그림자 끝점 계산 (더 정확한 변환)
+            // 위도는 약 111km당 1도, 경도는 위도에 따라 달라짐
+            double latDegreeInMeters = 111000.0;
+            double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(buildingLat));
+
             double shadowEndLat = buildingLat +
-                    (shadowLength * Math.cos(Math.toRadians(shadowDirection))) / 111000.0;
+                    (shadowLength * Math.cos(Math.toRadians(shadowDirection))) / latDegreeInMeters;
             double shadowEndLng = buildingLng +
-                    (shadowLength * Math.sin(Math.toRadians(shadowDirection))) /
-                            (111000.0 * Math.cos(Math.toRadians(buildingLat)));
+                    (shadowLength * Math.sin(Math.toRadians(shadowDirection))) / lngDegreeInMeters;
 
-            // 4. 건물 주변 원형 영역 (반지름 10m)
-            double buildingRadius = 10.0 / 111000.0; // 10m를 도 단위로 변환
+            // 4. 더 큰 그림자 반지름 설정
+            double shadowRadius = Math.max(50.0, shadowLength * 0.5) / Math.min(latDegreeInMeters, lngDegreeInMeters);
 
-            // 5. 그림자 영역을 원형으로 생성 (간단화)
-            double shadowRadius = Math.max(20.0, shadowLength * 0.2) / 111000.0;
+            // 5. 건물 중심에서도 그림자 영역 생성 (건물 자체 그림자)
+            double buildingRadius = 30.0 / latDegreeInMeters; // 30m 반지름
 
-            // 6. GeoJSON 형식으로 원형 그림자 생성
+            // 6. 두 개의 원형 그림자 생성: 건물 위치 + 그림자 끝점
             StringBuilder geoJson = new StringBuilder();
-            geoJson.append("{\"type\":\"Polygon\",\"coordinates\":[[");
+            geoJson.append("{\"type\":\"MultiPolygon\",\"coordinates\":[");
 
-            // 원형 그림자를 16각형으로 근사
+            // 첫 번째 원: 건물 위치
+            geoJson.append("[[[");
+            for (int i = 0; i <= 16; i++) {
+                double angle = (i * 360.0 / 16.0);
+                double pointLat = buildingLat + buildingRadius * Math.cos(Math.toRadians(angle));
+                double pointLng = buildingLng + buildingRadius * Math.sin(Math.toRadians(angle));
+
+                geoJson.append("[").append(pointLng).append(",").append(pointLat).append("]");
+                if (i < 16) geoJson.append(",");
+            }
+            geoJson.append("]]],");
+
+            // 두 번째 원: 그림자 끝점
+            geoJson.append("[[[");
             for (int i = 0; i <= 16; i++) {
                 double angle = (i * 360.0 / 16.0);
                 double pointLat = shadowEndLat + shadowRadius * Math.cos(Math.toRadians(angle));
@@ -256,17 +276,47 @@ public class ShadowRouteService {
                 geoJson.append("[").append(pointLng).append(",").append(pointLat).append("]");
                 if (i < 16) geoJson.append(",");
             }
+            geoJson.append("]]]");
 
-            geoJson.append("]]}");
+            geoJson.append("]}");
 
-            logger.debug("간단 그림자 계산: 길이={}m, 방향={}도, 중심=({}, {})",
-                    shadowLength, shadowDirection, shadowEndLat, shadowEndLng);
+            logger.debug("그림자 영역: 건물({}, {}) + 그림자끝({}, {}), 반지름={}m",
+                    buildingLat, buildingLng, shadowEndLat, shadowEndLng, shadowRadius * latDegreeInMeters);
 
             return geoJson.toString();
 
         } catch (Exception e) {
             logger.warn("간단 그림자 계산 실패: " + e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 경로와 그림자 교차 여부를 더 관대하게 확인
+     */
+    private boolean checkPointInShadowRelaxed(RoutePoint point, String mergedShadows) {
+        try {
+            // 1. 정확한 포함 확인
+            String containsSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
+            boolean exactContains = jdbcTemplate.queryForObject(containsSql, Boolean.class,
+                    mergedShadows, point.getLng(), point.getLat());
+
+            if (exactContains) return true;
+
+            // 2. 더 관대한 거리 기반 확인 (100m 이내)
+            String distanceSql = "SELECT ST_DWithin(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326), 0.001)";
+            boolean nearShadow = jdbcTemplate.queryForObject(distanceSql, Boolean.class,
+                    mergedShadows, point.getLng(), point.getLat());
+
+            if (nearShadow) {
+                logger.debug("포인트 ({}, {})가 그림자 100m 이내에 있음", point.getLat(), point.getLng());
+            }
+
+            return nearShadow;
+
+        } catch (Exception e) {
+            logger.warn("그림자 확인 실패: " + e.getMessage());
+            return false;
         }
     }
 
@@ -1057,76 +1107,53 @@ public class ShadowRouteService {
         return waypoint;
     }
 
-
     /**
-     * 그림자 비율 계산
+     * 그림자 비율 계산에서 관대한 확인 사용
      */
-    private void calculateShadowPercentage(Route route, List<ShadowArea> shadowAreas) {
-        logger.debug("=== 그림자 비율 계산 시작 ===");
-        logger.debug("shadowAreas 개수: " + shadowAreas.size());
+    private void calculateShadowPercentageRelaxed(Route route, List<ShadowArea> shadowAreas) {
+        logger.debug("=== 관대한 그림자 비율 계산 시작 ===");
 
         List<RoutePoint> points = route.getPoints();
 
         if (shadowAreas.isEmpty()) {
-            logger.debug("그림자 영역이 없음");
             route.setShadowPercentage(0);
             return;
         }
 
         try {
-            // 그림자 영역들을 하나의 다각형으로 합치기
             String mergedShadows = createShadowUnion(shadowAreas);
-            logger.debug("병합된 그림자 영역 사용");
 
             if (mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}")) {
                 route.setShadowPercentage(0);
                 return;
             }
 
-            // *** 디버깅 추가 ***
-            debugShadowRouteIntersection(route, shadowAreas, mergedShadows);
-
-            // 성능 최적화: 포인트 샘플링
-            List<RoutePoint> samplePoints = sampleRoutePoints(points, 20);
-
+            // 모든 포인트 확인 (샘플링 없이)
             int shadowCount = 0;
-            String pointInShadowSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
 
-            for (RoutePoint point : samplePoints) {
-                boolean isInShadow = false;
-
-                try {
-                    isInShadow = jdbcTemplate.queryForObject(
-                            pointInShadowSql, Boolean.class, mergedShadows, point.getLng(), point.getLat());
-                } catch (Exception e) {
-                    logger.warn("그림자 포함 여부 확인 실패: " + e.getMessage());
-                    break;
-                }
+            for (int i = 0; i < points.size(); i += 5) { // 5개마다 샘플링
+                RoutePoint point = points.get(i);
+                boolean isInShadow = checkPointInShadowRelaxed(point, mergedShadows);
 
                 point.setInShadow(isInShadow);
-                if (isInShadow) shadowCount++;
+                if (isInShadow) {
+                    shadowCount++;
+                    logger.debug("그림자 포인트 발견: idx={}, 위치=({}, {})",
+                            i, point.getLat(), point.getLng());
+                }
             }
 
-            // 샘플 기반 그림자 비율 계산
-            int shadowPercentage = samplePoints.size() > 0 ?
-                    (shadowCount * 100 / samplePoints.size()) : 0;
+            int sampledPoints = (points.size() + 4) / 5; // 샘플 포인트 수
+            int shadowPercentage = sampledPoints > 0 ? (shadowCount * 100 / sampledPoints) : 0;
 
             route.setShadowPercentage(shadowPercentage);
 
-            // 샘플링 결과를 전체 포인트에 적용
-            applyShadowInfoToAllPoints(points, samplePoints, shadowPercentage);
-
-            logger.debug("그림자 비율 계산 완료: {}% (샘플 기반, {}/{}개 포인트)",
-                    shadowPercentage, shadowCount, samplePoints.size());
+            logger.debug("관대한 그림자 비율 계산 완료: {}% ({}/{}개 포인트)",
+                    shadowPercentage, shadowCount, sampledPoints);
 
         } catch (Exception e) {
-            logger.error("그림자 비율 계산 오류: " + e.getMessage(), e);
+            logger.error("관대한 그림자 비율 계산 오류: " + e.getMessage(), e);
             route.setShadowPercentage(0);
-
-            // 오류 발생 시 기본값으로 설정
-            for (RoutePoint point : points) {
-                point.setInShadow(false);
-            }
         }
     }
 
