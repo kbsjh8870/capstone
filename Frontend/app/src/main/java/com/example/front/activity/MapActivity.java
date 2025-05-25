@@ -856,11 +856,15 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             Log.d(TAG, "그림자 경로 표시: " + route.getID());
         }
 
-        // 그림자 구간 오버레이 표시
-        for (TMapPolyLine shadowSegment : shadowSegments) {
-            tMapView.addTMapPolyLine(shadowSegment.getID(), shadowSegment);
-            Log.d(TAG, "그림자 오버레이 표시: " + shadowSegment.getID());
-        }
+        // 그림자 구간 오버레이 표시 - 경로 위에 표시되도록 나중에 추가
+        // 약간의 딜레이를 주어 경로가 먼저 그려지도록 함
+        new android.os.Handler().postDelayed(() -> {
+            for (TMapPolyLine shadowSegment : shadowSegments) {
+                tMapView.addTMapPolyLine(shadowSegment.getID(), shadowSegment);
+                Log.d(TAG, "그림자 오버레이 표시: " + shadowSegment.getID() + 
+                          ", 포인트 수: " + shadowSegment.getLinePoint().size());
+            }
+        }, 100);
 
         // 범례 표시
         LinearLayout shadowLegend = findViewById(R.id.shadow_legend);
