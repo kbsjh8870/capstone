@@ -150,55 +150,108 @@ public class ShadowRouteService {
                                                       SunPosition sunPos) {
 
         try {
-            // 경로 주변 영역 정의 (출발-도착 경로 박스 + 버퍼)
-            String boundingBoxSql = "SELECT ST_Buffer(ST_Envelope(ST_MakeLine(" +
-                    "ST_SetSRID(ST_MakePoint(?, ?), 4326), " +
-                    "ST_SetSRID(ST_MakePoint(?, ?), 4326))), 0.003) as search_area";
+            // 1. 태양 위치 로깅
+            logger.debug("=== 건물 그림자 계산 시작 ===");
+            logger.debug("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
+            logger.debug("경로 좌표: 시작({}, {}), 끝({}, {})", startLat, startLng, endLat, endLng);
 
-            // 테이블 존재 여부 확인
+            // 2. 테이블 존재 여부 확인
             String checkTableSql = "SELECT EXISTS (SELECT FROM information_schema.tables " +
                     "WHERE table_schema = 'public' AND table_name = 'AL_D010_26_20250304')";
             boolean tableExists = jdbcTemplate.queryForObject(checkTableSql, Boolean.class);
+            logger.debug("건물 테이블 존재 여부: {}", tableExists);
 
             if (!tableExists) {
                 logger.warn("건물 데이터 테이블이 존재하지 않습니다.");
                 return new ArrayList<>();
             }
 
-            logger.debug("검색 좌표: startLat={}, startLng={}, endLat={}, endLng={}", startLat, startLng, endLat, endLng);
-            logger.debug("태양 위치: 고도={}, 방위각={}", sunPos.getAltitude(), sunPos.getAzimuth());
+            // 3. 해당 지역의 건물 개수 먼저 확인
+            String countSql = "SELECT COUNT(*) FROM public.\"AL_D010_26_20250304\" b " +
+                    "WHERE ST_DWithin(b.geom, ST_MakeLine(" +
+                    "ST_SetSRID(ST_MakePoint(?, ?), 4326), " +
+                    "ST_SetSRID(ST_MakePoint(?, ?), 4326)), 0.003)";
 
-            // 해당 영역 내 건물 검색 및 그림자 계산
-            String shadowSql = "WITH search_area AS (" + boundingBoxSql + ") " +
-                    "SELECT b.id, b.\"A16\" as height, " +
+            Integer buildingCount = jdbcTemplate.queryForObject(countSql, Integer.class,
+                    startLng, startLat, endLng, endLat);
+            logger.debug("검색 범위 내 건물 개수: {}개", buildingCount);
+
+            if (buildingCount == null || buildingCount == 0) {
+                logger.warn("해당 지역에 건물 데이터가 없습니다.");
+                return new ArrayList<>();
+            }
+
+            // 4. 높이 정보가 있는 건물 개수 확인
+            String heightCountSql = "SELECT COUNT(*) FROM public.\"AL_D010_26_20250304\" b " +
+                    "WHERE ST_DWithin(b.geom, ST_MakeLine(" +
+                    "ST_SetSRID(ST_MakePoint(?, ?), 4326), " +
+                    "ST_SetSRID(ST_MakePoint(?, ?), 4326)), 0.003) " +
+                    "AND b.\"A16\" IS NOT NULL AND b.\"A16\" > 5";
+
+            Integer heightBuildingCount = jdbcTemplate.queryForObject(heightCountSql, Integer.class,
+                    startLng, startLat, endLng, endLat);
+            logger.debug("높이 정보가 있는 건물 개수: {}개 (5m 이상)", heightBuildingCount);
+
+            if (heightBuildingCount == null || heightBuildingCount == 0) {
+                logger.warn("해당 지역에 유효한 높이 정보를 가진 건물이 없습니다.");
+                return new ArrayList<>();
+            }
+
+            // 5. calculate_shadow_geometry 함수 존재 여부 확인
+            String checkFunctionSql = "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'calculate_shadow_geometry')";
+            boolean functionExists = jdbcTemplate.queryForObject(checkFunctionSql, Boolean.class);
+            logger.debug("그림자 계산 함수 존재 여부: {}", functionExists);
+
+            if (!functionExists) {
+                logger.error("calculate_shadow_geometry 함수가 존재하지 않습니다.");
+                return new ArrayList<>();
+            }
+
+            // 6. 실제 그림자 계산 쿼리 실행
+            String shadowSql = "SELECT b.id, b.\"A16\" as height, " +
                     "ST_AsGeoJSON(b.geom) as building_geom, " +
                     "ST_AsGeoJSON(calculate_shadow_geometry(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
-                    "FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
-                    "WHERE ST_Intersects(b.geom, sa.search_area) " +
-                    "AND b.\"A16\" > 5";
+                    "FROM public.\"AL_D010_26_20250304\" b " +
+                    "WHERE ST_DWithin(b.geom, ST_MakeLine(" +
+                    "ST_SetSRID(ST_MakePoint(?, ?), 4326), " +
+                    "ST_SetSRID(ST_MakePoint(?, ?), 4326)), 0.003) " +
+                    "AND b.\"A16\" IS NOT NULL AND b.\"A16\" > 5 " +
+                    "LIMIT 10"; // 최대 10개만 조회해서 성능 확인
 
-            // 파라미터 바인딩
+            logger.debug("그림자 계산 쿼리 실행 중...");
+            long startTime = System.currentTimeMillis();
+
             List<Map<String, Object>> results = jdbcTemplate.queryForList(
                     shadowSql,
-                    startLng, startLat, endLng, endLat,
-                    sunPos.getAzimuth(), sunPos.getAltitude());
+                    sunPos.getAzimuth(), sunPos.getAltitude(),
+                    startLng, startLat, endLng, endLat);
 
-            // 결과 파싱
+            long endTime = System.currentTimeMillis();
+            logger.debug("쿼리 실행 시간: {}ms, 결과 개수: {}개", (endTime - startTime), results.size());
+
+            // 7. 결과 파싱
             List<ShadowArea> shadowAreas = new ArrayList<>();
             for (Map<String, Object> row : results) {
-                ShadowArea area = new ShadowArea();
-                area.setId(((Number) row.get("id")).longValue());
-                area.setHeight(((Number) row.get("height")).doubleValue());
-                area.setBuildingGeometry((String) row.get("building_geom"));
-                area.setShadowGeometry((String) row.get("shadow_geom"));
-                shadowAreas.add(area);
+                try {
+                    ShadowArea area = new ShadowArea();
+                    area.setId(((Number) row.get("id")).longValue());
+                    area.setHeight(((Number) row.get("height")).doubleValue());
+                    area.setBuildingGeometry((String) row.get("building_geom"));
+                    area.setShadowGeometry((String) row.get("shadow_geom"));
+                    shadowAreas.add(area);
+
+                    logger.debug("건물 {}번: 높이={}m", area.getId(), area.getHeight());
+                } catch (Exception e) {
+                    logger.warn("그림자 영역 파싱 오류: " + e.getMessage());
+                }
             }
 
             logger.debug("건물 그림자 계산 완료: {}개 건물의 그림자 영역 생성", shadowAreas.size());
-
             return shadowAreas;
+
         } catch (Exception e) {
             logger.error("건물 그림자 계산 오류: " + e.getMessage(), e);
+            e.printStackTrace(); // 상세한 스택 트레이스 출력
             return new ArrayList<>();
         }
     }
