@@ -1026,12 +1026,6 @@ public class ShadowRouteService {
             return;
         }
 
-        // 성능 최적화: 그림자 영역이 너무 많으면 샘플링
-        if (shadowAreas.size() > 100) {
-            logger.debug("그림자 영역이 너무 많음 ({}개). 샘플링 적용", shadowAreas.size());
-            shadowAreas = sampleShadowAreas(shadowAreas, 50); // 최대 50개만 사용
-        }
-
         try {
             // 그림자 영역들을 하나의 다각형으로 합치기
             String mergedShadows = createShadowUnion(shadowAreas);
@@ -1042,8 +1036,11 @@ public class ShadowRouteService {
                 return;
             }
 
-            // 성능 최적화: 포인트 샘플링 (모든 포인트 확인하지 않고 샘플링)
-            List<RoutePoint> samplePoints = sampleRoutePoints(points, 20); // 최대 20개 포인트만 확인
+            // *** 디버깅 추가 ***
+            debugShadowRouteIntersection(route, shadowAreas, mergedShadows);
+
+            // 성능 최적화: 포인트 샘플링
+            List<RoutePoint> samplePoints = sampleRoutePoints(points, 20);
 
             int shadowCount = 0;
             String pointInShadowSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
@@ -1056,7 +1053,6 @@ public class ShadowRouteService {
                             pointInShadowSql, Boolean.class, mergedShadows, point.getLng(), point.getLat());
                 } catch (Exception e) {
                     logger.warn("그림자 포함 여부 확인 실패: " + e.getMessage());
-                    // 타임아웃이나 오류 발생 시 즉시 중단
                     break;
                 }
 
@@ -1070,10 +1066,11 @@ public class ShadowRouteService {
 
             route.setShadowPercentage(shadowPercentage);
 
-            // 샘플링 결과를 전체 포인트에 적용 (근사치)
+            // 샘플링 결과를 전체 포인트에 적용
             applyShadowInfoToAllPoints(points, samplePoints, shadowPercentage);
 
-            logger.debug("그림자 비율 계산 완료: {}% (샘플 기반)", shadowPercentage);
+            logger.debug("그림자 비율 계산 완료: {}% (샘플 기반, {}/{}개 포인트)",
+                    shadowPercentage, shadowCount, samplePoints.size());
 
         } catch (Exception e) {
             logger.error("그림자 비율 계산 오류: " + e.getMessage(), e);
@@ -1085,6 +1082,107 @@ public class ShadowRouteService {
             }
         }
     }
+
+    /**
+     * 그림자와 경로의 교차 여부를 상세히 디버깅
+     */
+    private void debugShadowRouteIntersection(Route route, List<ShadowArea> shadowAreas, String mergedShadows) {
+        logger.debug("=== 그림자-경로 교차점 디버깅 시작 ===");
+
+        List<RoutePoint> points = route.getPoints();
+        if (points.isEmpty()) {
+            logger.debug("경로 포인트가 없음");
+            return;
+        }
+
+        // 1. 경로 범위 확인
+        double minLat = points.stream().mapToDouble(RoutePoint::getLat).min().orElse(0);
+        double maxLat = points.stream().mapToDouble(RoutePoint::getLat).max().orElse(0);
+        double minLng = points.stream().mapToDouble(RoutePoint::getLng).min().orElse(0);
+        double maxLng = points.stream().mapToDouble(RoutePoint::getLng).max().orElse(0);
+
+        logger.debug("경로 범위: 위도[{} ~ {}], 경도[{} ~ {}]", minLat, maxLat, minLng, maxLng);
+
+        // 2. 개별 그림자 영역과의 교차 확인
+        for (int i = 0; i < Math.min(shadowAreas.size(), 3); i++) { // 처음 3개만 상세 확인
+            ShadowArea area = shadowAreas.get(i);
+            logger.debug("그림자 영역 {} (건물 {}번, 높이={}m) 분석:", i, area.getId(), area.getHeight());
+
+            try {
+                // 개별 그림자 영역과 경로의 교차 확인
+                String intersectionSql = "SELECT ST_Intersects(ST_GeomFromGeoJSON(?), " +
+                        "ST_MakeLine(ST_SetSRID(ST_MakePoint(?, ?), 4326), ST_SetSRID(ST_MakePoint(?, ?), 4326)))";
+
+                boolean intersects = jdbcTemplate.queryForObject(intersectionSql, Boolean.class,
+                        area.getShadowGeometry(),
+                        points.get(0).getLng(), points.get(0).getLat(),
+                        points.get(points.size()-1).getLng(), points.get(points.size()-1).getLat());
+
+                logger.debug("  경로와 교차 여부: {}", intersects);
+
+                // 그림자 영역의 경계 확인
+                String boundsSql = "SELECT ST_XMin(geom) as min_lng, ST_XMax(geom) as max_lng, " +
+                        "ST_YMin(geom) as min_lat, ST_YMax(geom) as max_lat " +
+                        "FROM (SELECT ST_GeomFromGeoJSON(?) as geom) t";
+
+                Map<String, Object> bounds = jdbcTemplate.queryForMap(boundsSql, area.getShadowGeometry());
+                logger.debug("  그림자 범위: 위도[{} ~ {}], 경도[{} ~ {}]",
+                        bounds.get("min_lat"), bounds.get("max_lat"),
+                        bounds.get("min_lng"), bounds.get("max_lng"));
+
+            } catch (Exception e) {
+                logger.debug("  그림자 영역 {} 분석 실패: {}", i, e.getMessage());
+            }
+        }
+
+        // 3. 병합된 그림자 영역 분석
+        if (mergedShadows != null && !mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}")) {
+            try {
+                // 병합된 그림자와 경로의 교차 확인
+                String mergedIntersectionSql = "SELECT ST_Intersects(ST_GeomFromGeoJSON(?), " +
+                        "ST_MakeLine(ST_SetSRID(ST_MakePoint(?, ?), 4326), ST_SetSRID(ST_MakePoint(?, ?), 4326)))";
+
+                boolean mergedIntersects = jdbcTemplate.queryForObject(mergedIntersectionSql, Boolean.class,
+                        mergedShadows,
+                        points.get(0).getLng(), points.get(0).getLat(),
+                        points.get(points.size()-1).getLng(), points.get(points.size()-1).getLat());
+
+                logger.debug("병합된 그림자와 경로 교차 여부: {}", mergedIntersects);
+
+                // 병합된 그림자 영역의 크기 확인
+                String areaSql = "SELECT ST_Area(ST_GeomFromGeoJSON(?)) as area";
+                Double shadowArea = jdbcTemplate.queryForObject(areaSql, Double.class, mergedShadows);
+                logger.debug("병합된 그림자 영역 크기: {} (제곱도)", shadowArea);
+
+            } catch (Exception e) {
+                logger.debug("병합된 그림자 분석 실패: {}", e.getMessage());
+            }
+        }
+
+        // 4. 샘플 포인트들의 그림자 포함 여부 확인
+        logger.debug("샘플 포인트 그림자 확인:");
+        int[] sampleIndices = {0, points.size()/4, points.size()/2, points.size()*3/4, points.size()-1};
+
+        for (int idx : sampleIndices) {
+            if (idx < points.size()) {
+                RoutePoint point = points.get(idx);
+                try {
+                    String pointCheckSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
+                    boolean inShadow = jdbcTemplate.queryForObject(pointCheckSql, Boolean.class,
+                            mergedShadows, point.getLng(), point.getLat());
+
+                    logger.debug("  포인트[{}] ({}, {}): 그림자 여부={}",
+                            idx, point.getLat(), point.getLng(), inShadow);
+
+                } catch (Exception e) {
+                    logger.debug("  포인트[{}] 확인 실패: {}", idx, e.getMessage());
+                }
+            }
+        }
+
+        logger.debug("=== 그림자-경로 교차점 디버깅 완료 ===");
+    }
+
 
     private List<ShadowArea> sampleShadowAreas(List<ShadowArea> shadowAreas, int maxCount) {
         if (shadowAreas.size() <= maxCount) {
