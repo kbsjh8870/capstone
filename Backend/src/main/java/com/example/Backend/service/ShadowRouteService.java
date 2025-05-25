@@ -145,72 +145,73 @@ public class ShadowRouteService {
     /**
      * 건물 그림자 계산
      */
-    private List<ShadowArea> calculateBuildingShadows(double startLat, double startLng,
-                                                      double endLat, double endLng,
-                                                      SunPosition sunPos) {
+    private List<ShadowArea> calculateBuildingShadows(
+            double startLat, double startLng, double endLat, double endLng, SunPosition sunPos) {
 
         try {
-            logger.debug("=== Java 기반 건물 그림자 계산 시작 ===");
-            logger.debug("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
+            // 그림자 길이 계산
+            double shadowLength = 100.0 / Math.tan(Math.toRadians(sunPos.getAltitude())); // 기준 높이 100m
+            double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
 
-            // 1. 태양 고도가 너무 낮으면 그림자 계산 생략
-            if (sunPos.getAltitude() < 5.0) {
-                logger.debug("태양 고도가 너무 낮음 ({}도). 그림자 계산 생략", sunPos.getAltitude());
-                return new ArrayList<>();
-            }
+            // *** PostGIS에서 직접 그림자 계산 ***
+            String sql = """
+            WITH route_area AS (
+                SELECT ST_Buffer(
+                    ST_MakeLine(
+                        ST_SetSRID(ST_MakePoint(?, ?), 4326),
+                        ST_SetSRID(ST_MakePoint(?, ?), 4326)
+                    ), 0.003
+                ) as geom
+            ),
+            building_shadows AS (
+                SELECT 
+                    b.id,
+                    b."A16" as height,
+                    ST_AsGeoJSON(b.geom) as building_geom,
+                    -- 건물 형태 그대로 그림자 방향으로 이동
+                    ST_AsGeoJSON(
+                        ST_Union(
+                            b.geom,  -- 건물 자체
+                            ST_Translate(
+                                b.geom,
+                                -- X 이동 (경도): 그림자 길이 * cos(방향각) / 경도변환계수
+                                (b."A16" / tan(radians(?))) * cos(radians(?)) / (111000.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                                -- Y 이동 (위도): 그림자 길이 * sin(방향각) / 위도변환계수  
+                                (b."A16" / tan(radians(?))) * sin(radians(?)) / 111000.0
+                            )
+                        )
+                    ) as shadow_geom
+                FROM public."AL_D010_26_20250304" b, route_area r
+                WHERE ST_Intersects(b.geom, r.geom)
+                  AND b."A16" > 5
+                  AND ? > 5  -- 태양 고도가 5도 이상일 때만
+                LIMIT 30
+            )
+            SELECT id, height, building_geom, shadow_geom
+            FROM building_shadows
+            """;
 
-            // 2. 경로 주변 건물 조회 (PostgreSQL 그림자 함수 사용하지 않음)
-            String buildingSql = "SELECT b.id, b.\"A16\" as height, " +
-                    "ST_AsGeoJSON(b.geom) as building_geom, " +
-                    "ST_X(ST_Centroid(b.geom)) as center_lng, " +
-                    "ST_Y(ST_Centroid(b.geom)) as center_lat " +
-                    "FROM public.\"AL_D010_26_20250304\" b " +
-                    "WHERE ST_DWithin(b.geom, ST_MakeLine(" +
-                    "ST_SetSRID(ST_MakePoint(?, ?), 4326), " +
-                    "ST_SetSRID(ST_MakePoint(?, ?), 4326)), 0.003) " +
-                    "AND b.\"A16\" > 5 " +
-                    "LIMIT 20";
-
-            List<Map<String, Object>> buildingResults = jdbcTemplate.queryForList(
-                    buildingSql, startLng, startLat, endLng, endLat);
-
-            logger.debug("주변 건물 조회 완료: {}개", buildingResults.size());
+            List<Map<String, Object>> results = jdbcTemplate.queryForList(sql,
+                    startLng, startLat, endLng, endLat,  // 경로 좌표
+                    sunPos.getAltitude(), shadowDirection,  // 태양 고도, 그림자 방향
+                    sunPos.getAltitude(), shadowDirection,  // 반복 (SQL 파라미터)
+                    sunPos.getAltitude());  // 태양 고도 조건
 
             List<ShadowArea> shadowAreas = new ArrayList<>();
-
-            for (Map<String, Object> row : buildingResults) {
-                try {
-                    long buildingId = ((Number) row.get("id")).longValue();
-                    double height = ((Number) row.get("height")).doubleValue();
-                    String buildingGeom = (String) row.get("building_geom");
-                    double centerLat = ((Number) row.get("center_lat")).doubleValue();
-                    double centerLng = ((Number) row.get("center_lng")).doubleValue();
-
-                    // 3. Java에서 간단한 그림자 계산
-                    String shadowGeom = calculateSimpleShadow(
-                            centerLat, centerLng, height, sunPos);
-
-                    if (shadowGeom != null) {
-                        ShadowArea area = new ShadowArea();
-                        area.setId(buildingId);
-                        area.setHeight(height);
-                        area.setBuildingGeometry(buildingGeom);
-                        area.setShadowGeometry(shadowGeom);
-                        shadowAreas.add(area);
-
-                        logger.debug("건물 {}번: 높이={}m, 그림자 계산 완료", buildingId, height);
-                    }
-
-                } catch (Exception e) {
-                    logger.warn("건물 그림자 계산 실패: " + e.getMessage());
-                }
+            for (Map<String, Object> row : results) {
+                ShadowArea area = new ShadowArea();
+                area.setId(((Number) row.get("id")).longValue());
+                area.setHeight(((Number) row.get("height")).doubleValue());
+                area.setBuildingGeometry((String) row.get("building_geom"));
+                area.setShadowGeometry((String) row.get("shadow_geom"));
+                shadowAreas.add(area);
             }
 
-            logger.debug("Java 기반 그림자 계산 완료: {}개 그림자 영역", shadowAreas.size());
+            logger.debug("PostGIS 기반 그림자 계산 완료: {}개 영역", shadowAreas.size());
             return shadowAreas;
 
         } catch (Exception e) {
-            logger.error("Java 그림자 계산 오류: " + e.getMessage(), e);
+            logger.error("PostGIS 그림자 계산 오류: " + e.getMessage(), e);
             return new ArrayList<>();
         }
     }
