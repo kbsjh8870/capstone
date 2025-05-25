@@ -1073,37 +1073,56 @@ public class ShadowRouteService {
     }
 
     /**
-     * 태양 위치 기반 스마트 경유지 계산
+     * 태양 위치 기반 경유지 계산
      */
     private RoutePoint calculateSunBasedWaypoint(List<RoutePoint> basePoints,
                                                  SunPosition sunPos, boolean avoidShadow,
                                                  double detourDistance) {
-
         if (basePoints.size() < 5) return null;
 
         int middleIndex = basePoints.size() / 2;
         RoutePoint middlePoint = basePoints.get(middleIndex);
 
-        // 태양 방위각 기반 우회 방향 계산
-        double sunAzimuthRad = Math.toRadians(sunPos.getAzimuth());
+        // *** 수정: 지리적 좌표계에 맞는 정확한 계산 ***
 
-        // 그림자 회피: 태양 반대 방향으로 우회
-        // 그림자 따라가기: 태양 방향으로 우회
-        double waypointDirection = avoidShadow ?
-                (sunAzimuthRad + Math.PI) : sunAzimuthRad; // 180도 차이
+        // 1. 우회 방향 결정
+        double targetAzimuth;
+        if (avoidShadow) {
+            // 그림자 회피: 태양 반대 방향 (그림자가 생기지 않는 방향)
+            targetAzimuth = (sunPos.getAzimuth() + 180) % 360;
+        } else {
+            // 그림자 따라가기: 태양이 있는 방향 (그림자가 생기는 방향의 반대)
+            targetAzimuth = sunPos.getAzimuth();
+        }
 
-        double waypointLat = middlePoint.getLat() +
-                detourDistance * Math.cos(waypointDirection);
-        double waypointLng = middlePoint.getLng() +
-                detourDistance * Math.sin(waypointDirection);
+        // 2. 방위각을 라디안으로 변환 (북쪽이 0도, 시계방향)
+        double azimuthRad = Math.toRadians(targetAzimuth);
+
+        // 3. 지리적 좌표계에 맞는 정확한 계산
+        // - 위도 변화: 북쪽이 +, 남쪽이 - (cos 사용)
+        // - 경도 변화: 동쪽이 +, 서쪽이 - (sin 사용)
+        double latDegreeInMeters = 111000.0; // 위도 1도 ≈ 111km
+        double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
+
+        // 4. 우회 거리를 200m로 설정
+        double detourMeters = 200.0;
+
+        // 5. 경유지 좌표 계산
+        double latOffset = detourMeters * Math.cos(azimuthRad) / latDegreeInMeters;
+        double lngOffset = detourMeters * Math.sin(azimuthRad) / lngDegreeInMeters;
+
+        double waypointLat = middlePoint.getLat() + latOffset;
+        double waypointLng = middlePoint.getLng() + lngOffset;
 
         RoutePoint waypoint = new RoutePoint();
         waypoint.setLat(waypointLat);
         waypoint.setLng(waypointLng);
 
-        logger.debug("태양 기반 경유지: 원점({}, {}) -> 경유지({}, {}), 태양방위={}도",
+        logger.debug("태양 기반 경유지 생성: 태양방위={}도, 목표방위={}도, 회피여부={}",
+                sunPos.getAzimuth(), targetAzimuth, avoidShadow);
+        logger.debug("원점({}, {}) -> 경유지({}, {}), 거리={}m",
                 middlePoint.getLat(), middlePoint.getLng(),
-                waypointLat, waypointLng, sunPos.getAzimuth());
+                waypointLat, waypointLng, detourMeters);
 
         return waypoint;
     }
