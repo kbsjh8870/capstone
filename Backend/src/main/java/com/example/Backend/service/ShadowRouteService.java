@@ -55,7 +55,27 @@ public class ShadowRouteService {
             // 2. 태양 위치 계산
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
 
-            // 3. 경로 주변 건물들의 그림자 계산 (실제 DB 데이터 사용)
+            // *** 핵심 수정: 태양 고도각이 낮으면 그림자 경로도 기본 경로와 동일하게 ***
+            if (sunPos.getAltitude() < 5.0) {
+                // 새벽/밤 시간대: 그림자가 없으므로 기본 경로를 복사해서 반환
+                logger.debug("태양 고도각이 낮음 ({}도). 그림자 경로도 기본 경로와 동일하게 설정",
+                        sunPos.getAltitude());
+
+                // 그림자 X와 그림자 O 모두 기본 T맵 경로와 동일하게 설정
+                Route shadowRoute = copyBasicRoute(basicRoute);
+                shadowRoute.setBasicRoute(false);
+                shadowRoute.setAvoidShadow(avoidShadow);
+                shadowRoute.setDateTime(dateTime);
+                shadowRoute.setShadowPercentage(0); // 그림자 없음
+                shadowRoute.setShadowAreas(new ArrayList<>()); // 빈 그림자 영역
+
+                routes.add(shadowRoute);
+
+                logger.info("새벽 시간대 처리 완료: 기본 경로와 그림자 경로가 동일함");
+                return routes;
+            }
+
+            // 3. 경로 주변 건물들의 그림자 계산 (태양이 있을 때만)
             List<ShadowArea> shadowAreas = calculateBuildingShadows(startLat, startLng, endLat, endLng, sunPos);
 
             // 4. 그림자 정보를 기반으로 대체 경로 계산
@@ -66,8 +86,7 @@ public class ShadowRouteService {
             } else {
                 // 건물 데이터가 없으면 기본 경로만 사용 (그림자 정보 없음)
                 logger.debug("건물 데이터가 없음. 기본 경로만 사용");
-                shadowRoute = createShadowRouteFromBasicRoute(basicRoute, sunPos, avoidShadow);
-                // 실제 그림자 데이터가 없으므로 그림자 비율은 0
+                shadowRoute = copyBasicRoute(basicRoute);
                 shadowRoute.setShadowPercentage(0);
             }
 
@@ -98,6 +117,29 @@ public class ShadowRouteService {
 
             return routes;
         }
+    }
+
+    private Route copyBasicRoute(Route originalRoute) {
+        Route copiedRoute = new Route();
+
+        // 포인트 복사
+        List<RoutePoint> copiedPoints = new ArrayList<>();
+        for (RoutePoint originalPoint : originalRoute.getPoints()) {
+            RoutePoint newPoint = new RoutePoint();
+            newPoint.setLat(originalPoint.getLat());
+            newPoint.setLng(originalPoint.getLng());
+            newPoint.setInShadow(false); // 그림자 없음으로 설정
+            copiedPoints.add(newPoint);
+        }
+
+        copiedRoute.setPoints(copiedPoints);
+        copiedRoute.setDistance(originalRoute.getDistance());
+        copiedRoute.setDuration(originalRoute.getDuration());
+
+        logger.debug("기본 경로 복사 완료: 포인트 수={}, 거리={}m",
+                copiedPoints.size(), originalRoute.getDistance());
+
+        return copiedRoute;
     }
 
     /**
