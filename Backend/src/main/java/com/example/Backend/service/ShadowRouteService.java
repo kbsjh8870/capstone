@@ -123,22 +123,17 @@ public class ShadowRouteService {
                 return new ArrayList<>();
             }
 
+            logger.debug("검색 좌표: startLat={}, startLng={}, endLat={}, endLng={}", startLat, startLng, endLat, endLng);
+            logger.debug("태양 위치: 고도={}, 방위각={}", sunPos.getAltitude(), sunPos.getAzimuth());
+
             // 해당 영역 내 건물 검색 및 그림자 계산
             String shadowSql = "WITH search_area AS (" + boundingBoxSql + ") " +
                     "SELECT b.id, b.\"A16\" as height, " +
-                    "ST_AsGeoJSON(b.geom) as building_geom, " +  // ST_Transform 제거
+                    "ST_AsGeoJSON(b.geom) as building_geom, " +
                     "ST_AsGeoJSON(calculate_shadow_geometry(b.geom, b.\"A16\", ?, ?)) as shadow_geom " +
                     "FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
-                    "WHERE ST_Intersects(b.geom, sa.search_area) " +  // ST_Transform 제거
+                    "WHERE ST_Intersects(b.geom, sa.search_area) " +
                     "AND b.\"A16\" > 5";
-
-            // calculate_shadow_geometry 함수 존재 확인
-            String checkFunctionSql = "SELECT EXISTS (SELECT FROM pg_proc WHERE proname = 'calculate_shadow_geometry')";
-            boolean functionExists = jdbcTemplate.queryForObject(checkFunctionSql, Boolean.class);
-
-            // 태양 고도가 낮을 때 방위각에 따른 그림자 방향 계산
-            double shadowDirX = -Math.cos(Math.toRadians(sunPos.getAzimuth()));
-            double shadowDirY = -Math.sin(Math.toRadians(sunPos.getAzimuth()));
 
             // 파라미터 바인딩
             List<Map<String, Object>> results = jdbcTemplate.queryForList(
@@ -157,22 +152,7 @@ public class ShadowRouteService {
                 shadowAreas.add(area);
             }
 
-            logger.debug("건물 검색 결과: " + results.size() + "개 건물");
-
-            // calculateBuildingShadows 메서드의 테이블 존재 확인 후에 추가
-            logger.debug("검색 좌표: startLat={}, startLng={}, endLat={}, endLng={}", startLat, startLng, endLat, endLng);
-
-            // 먼저 전체 건물 개수 확인
-            String countSql = "SELECT COUNT(*) FROM public.\"AL_D010_26_20250304\" WHERE \"A16\" > 5";
-            int totalBuildings = jdbcTemplate.queryForObject(countSql, Integer.class);
-            logger.debug("전체 건물 개수 (높이 > 5m): {}", totalBuildings);
-
-            // 검색 영역 내 모든 건물 개수 (높이 조건 없이)
-            String areaCountSql = "WITH search_area AS (" + boundingBoxSql + ") " +
-                    "SELECT COUNT(*) FROM public.\"AL_D010_26_20250304\" b, search_area sa " +
-                    "WHERE ST_Intersects(b.geom, sa.search_area)";
-            int areaBuildings = jdbcTemplate.queryForObject(areaCountSql, Integer.class, startLng, startLat, endLng, endLat);
-            logger.debug("검색 영역 내 건물 개수: {}", areaBuildings);
+            logger.debug("건물 그림자 계산 완료: {}개 건물의 그림자 영역 생성", shadowAreas.size());
 
             return shadowAreas;
         } catch (Exception e) {
@@ -521,47 +501,55 @@ public class ShadowRouteService {
         }
 
         try {
-            // 성능 최적화: 포인트 수가 많으면 샘플링
             List<RoutePoint> points = route.getPoints();
-            List<RoutePoint> checkPoints = points.size() > 30 ? sampleRoutePoints(points, 15) : points;
+            logger.debug("=== 그림자 정보 추가 시작 ===");
+            logger.debug("전체 포인트 수: " + points.size());
 
+            // 모든 포인트에 대해 그림자 여부 확인 (샘플링 없이)
             String pointInShadowSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
-
             int shadowCount = 0;
+            int processedCount = 0;
 
-            for (RoutePoint point : checkPoints) {
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
                 boolean isInShadow = false;
 
                 try {
                     isInShadow = jdbcTemplate.queryForObject(
                             pointInShadowSql, Boolean.class,
                             mergedShadows, point.getLng(), point.getLat());
+                    processedCount++;
                 } catch (Exception e) {
-                    logger.warn("그림자 포함 여부 확인 실패: " + e.getMessage());
-                    // 타임아웃 시 즉시 중단
-                    break;
+                    logger.warn("포인트 " + i + " 그림자 확인 실패: " + e.getMessage());
+                    // 오류가 발생해도 계속 진행
+                    isInShadow = false;
+                    processedCount++;
                 }
 
                 point.setInShadow(isInShadow);
-                if (isInShadow) shadowCount++;
+                if (isInShadow) {
+                    shadowCount++;
+                    if (shadowCount <= 5) { // 처음 5개만 로깅
+                        logger.debug("그림자 포인트 발견: idx=" + i + ", lat=" + point.getLat() + ", lng=" + point.getLng());
+                    }
+                }
             }
 
-            // 샘플 기반 그림자 비율 계산
-            int shadowPercentage = checkPoints.size() > 0 ?
-                    (shadowCount * 100 / checkPoints.size()) : 0;
+            // 그림자 비율 계산
+            int shadowPercentage = processedCount > 0 ?
+                    (shadowCount * 100 / processedCount) : 0;
             route.setShadowPercentage(shadowPercentage);
 
-            // 샘플링한 경우 전체 포인트에 적용
-            if (checkPoints.size() < points.size()) {
-                applyShadowInfoToAllPoints(points, checkPoints, shadowPercentage);
-            }
-
-            logger.debug("실제 그림자 정보 추가 완료: " + shadowCount + "/" + checkPoints.size() +
-                    " (" + shadowPercentage + "%) - 샘플링 사용");
+            logger.debug("그림자 정보 추가 완료: " + shadowCount + "/" + processedCount +
+                    " 포인트가 그림자 영역에 있음 (" + shadowPercentage + "%)");
 
         } catch (Exception e) {
             logger.error("그림자 정보 추가 오류: " + e.getMessage(), e);
             route.setShadowPercentage(0);
+            // 오류 발생 시 모든 포인트를 그림자 없음으로 설정
+            for (RoutePoint point : route.getPoints()) {
+                point.setInShadow(false);
+            }
         }
     }
 
