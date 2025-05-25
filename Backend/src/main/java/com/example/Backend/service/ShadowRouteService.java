@@ -364,9 +364,9 @@ public class ShadowRouteService {
             boolean avoidShadow) {
 
         try {
-            logger.debug("=== 태양 위치 기반 경로 계산 시작 ===");
-            logger.debug("시작점: ({}, {}), 끝점: ({}, {})", startLat, startLng, endLat, endLng);
-            logger.debug("그림자 회피: {}, 그림자 영역: {}개", avoidShadow, shadowAreas.size());
+            logger.debug("=== 그림자 인식 경로 계산 시작 ===");
+            logger.debug("시작: ({}, {}), 끝: ({}, {})", startLat, startLng, endLat, endLng);
+            logger.debug("그림자 회피: {}", avoidShadow);
 
             // 1. 기본 경로 획득
             String baseRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
@@ -378,19 +378,22 @@ public class ShadowRouteService {
                 return baseRoute;
             }
 
-            // 2. 태양 위치 기반 경유지 계산 (실제 DB 그림자 고려)
+            // 2. 태양 위치 계산
+            SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, LocalDateTime.now());
+
+            // 3. *** 수정: 태양 위치 기반 경유지 계산 ***
             RoutePoint strategicWaypoint = calculateShadowBasedWaypoint(
-                    baseRoute.getPoints(), shadowAreas, avoidShadow);
+                    baseRoute.getPoints(), shadowAreas, avoidShadow, sunPos);
 
             if (strategicWaypoint == null) {
-                logger.debug("적절한 경유지를 찾지 못함. 기본 경로 사용");
+                logger.debug("경유지 생성 실패. 기본 경로 사용");
                 baseRoute.setAvoidShadow(avoidShadow);
                 return baseRoute;
             }
 
-            // 3. 경유지 기반 새 경로 생성
             logger.debug("경유지 위치: ({}, {})", strategicWaypoint.getLat(), strategicWaypoint.getLng());
 
+            // 4. 경유지 기반 새 경로 생성
             String waypointRouteJson = tmapApiService.getWalkingRouteWithWaypoint(
                     startLat, startLng,
                     strategicWaypoint.getLat(), strategicWaypoint.getLng(),
@@ -399,7 +402,7 @@ public class ShadowRouteService {
             Route shadowAwareRoute = parseBasicRoute(waypointRouteJson);
             shadowAwareRoute.setAvoidShadow(avoidShadow);
 
-            // 4. 경로 품질 검증
+            // 5. 경로 품질 검증
             if (isRouteQualityAcceptable(baseRoute, shadowAwareRoute)) {
                 logger.debug("그림자 인식 경로 생성 성공");
                 return shadowAwareRoute;
@@ -427,72 +430,65 @@ public class ShadowRouteService {
      */
     private RoutePoint calculateShadowBasedWaypoint(List<RoutePoint> basePoints,
                                                     List<ShadowArea> shadowAreas,
-                                                    boolean avoidShadow) {
-
+                                                    boolean avoidShadow,
+                                                    SunPosition sunPos) {
         if (basePoints.size() < 5) return null;
 
         try {
-            // 1. 그림자 영역들을 하나의 지오메트리로 병합
-            String mergedShadows = createShadowUnion(shadowAreas);
+            // 1. 경로 중간점 선택
+            int middleIndex = basePoints.size() / 2;
+            RoutePoint middlePoint = basePoints.get(middleIndex);
 
-            if (mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}")) {
+            logger.debug("=== 태양 기반 경유지 계산 ===");
+            logger.debug("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
+            logger.debug("중간점: ({}, {}), 회피여부={}", middlePoint.getLat(), middlePoint.getLng(), avoidShadow);
+
+            // 2. 태양 위치 기반 우회 방향 결정
+            double targetDirection;
+            if (avoidShadow) {
+                // 그림자 X: 태양이 있는 방향으로 이동 (그림자 반대편)
+                targetDirection = sunPos.getAzimuth();
+            } else {
+                // 그림자 O: 태양 반대 방향으로 이동 (그림자가 있는 곳)
+                targetDirection = (sunPos.getAzimuth() + 180) % 360;
+            }
+
+            logger.debug("목표 방향: {}도 ({})", targetDirection, avoidShadow ? "태양방향" : "태양반대방향");
+
+            // 3. 우회 거리 설정 (300m)
+            double detourMeters = 300.0;
+            double latDegreeInMeters = 111000.0;
+            double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
+
+            // 4. 방위각을 지리 좌표로 변환
+            double directionRad = Math.toRadians(targetDirection);
+            double latOffset = detourMeters * Math.cos(directionRad) / latDegreeInMeters;
+            double lngOffset = detourMeters * Math.sin(directionRad) / lngDegreeInMeters;
+
+            // 5. 경유지 좌표 계산
+            double waypointLat = middlePoint.getLat() + latOffset;
+            double waypointLng = middlePoint.getLng() + lngOffset;
+
+            // 6. 좌표 유효성 검사
+            if (Math.abs(waypointLat) > 90 || Math.abs(waypointLng) > 180) {
+                logger.error("잘못된 경유지 좌표: ({}, {})", waypointLat, waypointLng);
                 return null;
             }
 
-            // 2. 기본 경로 중간 지점들 중에서 그림자 영향이 큰 지점 찾기
-            List<RoutePoint> candidatePoints = new ArrayList<>();
-            int startIdx = basePoints.size() / 4;  // 25% 지점부터
-            int endIdx = basePoints.size() * 3 / 4; // 75% 지점까지
+            RoutePoint waypoint = new RoutePoint();
+            waypoint.setLat(waypointLat);
+            waypoint.setLng(waypointLng);
 
-            for (int i = startIdx; i <= endIdx; i += 3) { // 3포인트마다 샘플링
-                if (i < basePoints.size()) {
-                    candidatePoints.add(basePoints.get(i));
-                }
-            }
+            logger.debug("생성된 경유지: ({}, {}), 거리={}m", waypointLat, waypointLng, detourMeters);
 
-            logger.debug("경유지 후보 지점: {}개", candidatePoints.size());
-
-            // 3. 각 후보 지점의 그림자 영향도 계산
-            RoutePoint bestWaypoint = null;
-            double bestScore = -1;
-
-            for (RoutePoint candidate : candidatePoints) {
-                boolean isInShadow = checkPointInShadow(candidate, mergedShadows);
-
-                // 그림자 회피: 그림자 밖으로 나가는 경유지가 좋음
-                // 그림자 따라가기: 그림자 안으로 들어가는 경유지가 좋음
-                boolean isGoodCandidate = (avoidShadow && isInShadow) || (!avoidShadow && !isInShadow);
-
-                if (isGoodCandidate) {
-                    // 4. 이 지점에서 적절한 우회 경유지 생성
-                    RoutePoint waypoint = generateStrategicWaypoint(candidate, basePoints, avoidShadow, mergedShadows);
-
-                    if (waypoint != null) {
-                        double score = calculateWaypointScore(waypoint, mergedShadows, avoidShadow);
-
-                        if (score > bestScore) {
-                            bestScore = score;
-                            bestWaypoint = waypoint;
-                        }
-
-                        logger.debug("경유지 후보 평가: 점수={}, 위치=({}, {})",
-                                score, waypoint.getLat(), waypoint.getLng());
-                    }
-                }
-            }
-
-            if (bestWaypoint != null) {
-                logger.debug("최적 경유지 선택: 점수={}, 위치=({}, {})",
-                        bestScore, bestWaypoint.getLat(), bestWaypoint.getLng());
-            }
-
-            return bestWaypoint;
+            return waypoint;
 
         } catch (Exception e) {
-            logger.error("그림자 기반 경유지 계산 오류: " + e.getMessage(), e);
+            logger.error("태양 기반 경유지 계산 오류: " + e.getMessage(), e);
             return null;
         }
     }
+
     /**
      * 포인트가 그림자 영역에 있는지 확인
      */
