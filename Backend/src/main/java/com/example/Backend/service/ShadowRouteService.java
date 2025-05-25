@@ -82,7 +82,8 @@ public class ShadowRouteService {
             Route shadowRoute;
             if (!shadowAreas.isEmpty()) {
                 // 건물 데이터가 있으면 그림자 정보 활용
-                shadowRoute = calculateShadowAwareRoute(startLat, startLng, endLat, endLng, shadowAreas, avoidShadow);
+                shadowRoute = calculateShadowAwareRoute(startLat, startLng, endLat, endLng,
+                        shadowAreas, avoidShadow, dateTime);
             } else {
                 // 건물 데이터가 없으면 기본 경로만 사용 (그림자 정보 없음)
                 logger.debug("건물 데이터가 없음. 기본 경로만 사용");
@@ -361,7 +362,8 @@ public class ShadowRouteService {
             double startLat, double startLng,
             double endLat, double endLng,
             List<ShadowArea> shadowAreas,
-            boolean avoidShadow) {
+            boolean avoidShadow,
+            LocalDateTime dateTime) {
 
         try {
             logger.debug("=== 그림자 인식 경로 계산 시작 ===");
@@ -379,7 +381,7 @@ public class ShadowRouteService {
             }
 
             // 2. 태양 위치 계산
-            SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, LocalDateTime.now());
+            SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
 
             // 3. *** 수정: 태양 위치 기반 경유지 계산 ***
             RoutePoint strategicWaypoint = calculateShadowBasedWaypoint(
@@ -447,10 +449,12 @@ public class ShadowRouteService {
             double targetDirection;
             if (avoidShadow) {
                 // 그림자 X: 태양이 있는 방향으로 이동 (그림자 반대편)
-                targetDirection = sunPos.getAzimuth();
+                targetDirection = (sunPos.getAzimuth() + 180) % 360;
+                logger.debug("그림자 회피: 태양 반대방향 {}도", targetDirection);
             } else {
                 // 그림자 O: 태양 반대 방향으로 이동 (그림자가 있는 곳)
-                targetDirection = (sunPos.getAzimuth() + 180) % 360;
+                targetDirection = sunPos.getAzimuth();
+                logger.debug("그림자 따라가기: 태양방향 {}도", targetDirection);
             }
 
             logger.debug("목표 방향: {}도 ({})", targetDirection, avoidShadow ? "태양방향" : "태양반대방향");
