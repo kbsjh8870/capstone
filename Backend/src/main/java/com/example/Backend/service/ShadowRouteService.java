@@ -459,8 +459,8 @@ public class ShadowRouteService {
 
             logger.debug("목표 방향: {}도 ({})", targetDirection, avoidShadow ? "태양방향" : "태양반대방향");
 
-            // 3. 우회 거리 설정 (300m)
-            double detourMeters = 300.0;
+            // 3. 우회 거리 설정
+            double detourMeters = 50.0;
             double latDegreeInMeters = 111000.0;
             double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
 
