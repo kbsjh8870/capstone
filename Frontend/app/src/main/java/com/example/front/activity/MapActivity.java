@@ -657,7 +657,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     }
 
     /**
-     * 그림자 경로 표시 - 수정된 버전
+     * 그림자 경로 표시
      */
     private void displayShadowRoutes(JSONArray routesArray) throws JSONException {
         if (routesArray.length() == 0) {
@@ -724,6 +724,18 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 if (routeObj.has("shadowAreas")) {
                     displayShadowAreas(routeObj.getJSONArray("shadowAreas"));
                 }
+            }
+
+            if (!isBasicRoute) {
+                // 디버깅 로그 추가
+                Log.d(TAG, "그림자 경로 발견, 오버레이 생성 시작");
+                Log.d(TAG, "포인트 배열 내용 확인 - 첫 5개 포인트:");
+                for (int j = 0; j < Math.min(5, pointsArray.length()); j++) {
+                    JSONObject pt = pointsArray.getJSONObject(j);
+                    Log.d(TAG, "포인트 " + j + ": inShadow=" + pt.optBoolean("inShadow", false));
+                }
+
+                createShadowOverlayFromPoints(pointsArray, r);
             }
 
             // 경로 좌표 추가 - 원본 방식 유지
@@ -827,10 +839,10 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         TMapPolyLine shadowOverlay = new TMapPolyLine();
         shadowOverlay.setID("shadow_overlay_" + routeIndex + "_" + segmentIndex);
 
-        // 그림자 구간 스타일 - 어두운 회색으로 오버레이
-        shadowOverlay.setLineColor(COLOR_SHADOW_SEGMENT); // 어두운 회색
-        shadowOverlay.setLineWidth(8.0f); // 메인 경로보다 두껍게
-        shadowOverlay.setLineAlpha(180); // 반투명
+        // 그림자 구간 스타일 - 더 진하고 두껍게
+        shadowOverlay.setLineColor(Color.parseColor("#000000")); // 검은색
+        shadowOverlay.setLineWidth(14.0f); // 매우 두껍게
+        shadowOverlay.setLineAlpha(150); // 반투명
 
         // 포인트 추가
         for (TMapPoint point : points) {
@@ -856,21 +868,21 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             Log.d(TAG, "그림자 경로 표시: " + route.getID());
         }
 
-        // 그림자 구간 오버레이 표시 - 경로 위에 표시되도록 나중에 추가
-        // 약간의 딜레이를 주어 경로가 먼저 그려지도록 함
-        new android.os.Handler().postDelayed(() -> {
-            for (TMapPolyLine shadowSegment : shadowSegments) {
-                tMapView.addTMapPolyLine(shadowSegment.getID(), shadowSegment);
-                Log.d(TAG, "그림자 오버레이 표시: " + shadowSegment.getID() + 
-                          ", 포인트 수: " + shadowSegment.getLinePoint().size());
-            }
-        }, 100);
+        // 그림자 구간 오버레이 표시 - 즉시 표시
+        for (TMapPolyLine shadowSegment : shadowSegments) {
+            tMapView.addTMapPolyLine(shadowSegment.getID(), shadowSegment);
+            Log.d(TAG, "그림자 오버레이 표시: " + shadowSegment.getID() +
+                    ", 포인트 수: " + shadowSegment.getLinePoint().size());
+        }
 
         // 범례 표시
         LinearLayout shadowLegend = findViewById(R.id.shadow_legend);
         shadowLegend.setVisibility(View.VISIBLE);
 
         // 범례 색상 업데이트
+        View legendShadow = findViewById(R.id.legend_shadow);
+        legendShadow.setBackgroundColor(Color.parseColor("#000000")); // 검은색
+
         View legendSunny = findViewById(R.id.legend_sunny);
         if (avoidShadow) {
             legendSunny.setBackgroundColor(COLOR_AVOID_SHADOW); // 주황색
