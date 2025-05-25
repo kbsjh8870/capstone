@@ -82,10 +82,9 @@ public class SunPositionCalculator {
                         Math.sin(2 * Math.toRadians(geomMeanAnomSun)));
 
         // 15. 시간각 계산
-        // 표준 시간대 오프셋 계산 (한국: +9시간)
-        double timeOffset = 9 * 60; // 분 단위
+        // 로컬 시간을 사용 (이미 ZonedDateTime으로 시간대가 적용됨)
         double trueSolarTime = (zonedDateTime.getHour() * 60 + zonedDateTime.getMinute() +
-                zonedDateTime.getSecond() / 60 + timeOffset + eqOfTime * 4) % 1440;
+                zonedDateTime.getSecond() / 60 + eqOfTime * 4 - longitude * 4) % 1440;
 
         double hourAngle;
         if (trueSolarTime < 0) {
