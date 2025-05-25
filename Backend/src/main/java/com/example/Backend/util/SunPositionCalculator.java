@@ -20,11 +20,14 @@ public class SunPositionCalculator {
         // 시간대 적용 (서울 시간대 - Asia/Seoul)
         ZonedDateTime zonedDateTime = dateTime.atZone(ZoneId.of("Asia/Seoul"));
 
-        // 1. 날짜를 율리우스 일로 변환
-        double julianDay = zonedDateTime.getLong(JulianFields.JULIAN_DAY) +
-                (zonedDateTime.getHour() - 9) / 24.0 + // 9시간 조정 (한국 시간)
-                zonedDateTime.getMinute() / 1440.0 +
-                zonedDateTime.getSecond() / 86400.0;
+        // *** 핵심 수정: UTC 시간으로 변환 ***
+        ZonedDateTime utcDateTime = zonedDateTime.withZoneSameInstant(ZoneId.of("UTC"));
+
+        // 1. 날짜를 율리우스 일로 변환 (UTC 기준)
+        double julianDay = utcDateTime.getLong(JulianFields.JULIAN_DAY) +
+                utcDateTime.getHour() / 24.0 +  // UTC 시간 사용
+                utcDateTime.getMinute() / 1440.0 +
+                utcDateTime.getSecond() / 86400.0;
 
         // 2. 율리우스 세기 계산
         double julianCentury = (julianDay - 2451545.0) / 36525.0;
@@ -51,7 +54,7 @@ public class SunPositionCalculator {
         // 8. 태양 진근점 이각 계산
         double sunTrueAnom = geomMeanAnomSun + sunEqOfCtr;
 
-        // 9. 태양 반경 벡터 계산 (AU)
+        // 9. 태양 반지름 벡터 계산 (AU)
         double sunRadVector = (1.000001018 * (1 - eccentEarthOrbit * eccentEarthOrbit)) /
                 (1 + eccentEarthOrbit * Math.cos(Math.toRadians(sunTrueAnom)));
 
@@ -81,17 +84,13 @@ public class SunPositionCalculator {
                 1.25 * eccentEarthOrbit * eccentEarthOrbit *
                         Math.sin(2 * Math.toRadians(geomMeanAnomSun)));
 
-        // 15. 시간각 계산
-        // 로컬 시간을 사용 (이미 ZonedDateTime으로 시간대가 적용됨)
-        double trueSolarTime = (zonedDateTime.getHour() * 60 + zonedDateTime.getMinute() +
-                zonedDateTime.getSecond() / 60 + eqOfTime * 4 - longitude * 4) % 1440;
+        // *** 핵심 수정: 시간각 계산을 Local Solar Time 기준으로 수정 ***
+        // 15. 로컬 태양시 계산
+        double localSolarTime = (utcDateTime.getHour() * 60 + utcDateTime.getMinute() +
+                utcDateTime.getSecond() / 60.0 + eqOfTime + longitude * 4) / 60.0;
 
-        double hourAngle;
-        if (trueSolarTime < 0) {
-            hourAngle = trueSolarTime / 4 + 180;
-        } else {
-            hourAngle = trueSolarTime / 4 - 180;
-        }
+        // 시간각 계산 (정오 기준으로 15도씩 변화)
+        double hourAngle = (localSolarTime - 12.0) * 15.0;
 
         // 16. 태양 천정각 계산 (도)
         double solarZenithAngle = Math.toDegrees(Math.acos(
@@ -135,6 +134,12 @@ public class SunPositionCalculator {
                             Math.sin(Math.toRadians(sunDeclin))) /
                             (Math.cos(Math.toRadians(latitude)) * Math.sin(Math.toRadians(solarZenithAngle)))))) % 360;
         }
+
+        // *** 디버깅 로그 추가 ***
+        System.out.printf("태양 위치 계산: 입력시간=%s, UTC=%s, 경도=%.3f, 위도=%.3f%n",
+                dateTime, utcDateTime, longitude, latitude);
+        System.out.printf("계산 결과: 고도=%.2f도, 방위각=%.2f도, 시간각=%.2f도%n",
+                solarElevationCorrected, solarAzimuth, hourAngle);
 
         return new SunPosition(solarElevationCorrected, solarAzimuth);
     }
