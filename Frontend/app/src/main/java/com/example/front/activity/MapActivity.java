@@ -794,10 +794,13 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
     private void createShadowOverlayFromPoints(JSONArray pointsArray, int routeIndex) {
         try {
+            Log.d(TAG, "=== 그림자 오버레이 생성 시작 ===");
+            Log.d(TAG, "전체 포인트 수: " + pointsArray.length());
+
             List<TMapPoint> currentShadowSegment = new ArrayList<>();
             int shadowSegmentCount = 0;
+            int totalShadowPoints = 0;
 
-            // 경로 포인트를 순회하며 그림자 구간 찾기
             for (int i = 0; i < pointsArray.length(); i++) {
                 JSONObject point = pointsArray.getJSONObject(i);
                 double lat = point.getDouble("lat");
@@ -807,23 +810,48 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 TMapPoint tMapPoint = new TMapPoint(lat, lng);
 
                 if (inShadow) {
-                    // 그림자 구간에 포인트 추가
                     currentShadowSegment.add(tMapPoint);
+                    totalShadowPoints++;
+
+                    // *** 단일 그림자 포인트도 구간으로 만들기 ***
+                    if (currentShadowSegment.size() == 1) {
+                        // 앞 포인트 추가 (있다면)
+                        if (i > 0) {
+                            JSONObject prevPoint = pointsArray.getJSONObject(i - 1);
+                            TMapPoint prevTMapPoint = new TMapPoint(
+                                    prevPoint.getDouble("lat"),
+                                    prevPoint.getDouble("lng")
+                            );
+                            currentShadowSegment.add(0, prevTMapPoint); // 맨 앞에 추가
+                        }
+
+                        // 뒤 포인트 추가 (있다면)
+                        if (i < pointsArray.length() - 1) {
+                            JSONObject nextPoint = pointsArray.getJSONObject(i + 1);
+                            TMapPoint nextTMapPoint = new TMapPoint(
+                                    nextPoint.getDouble("lat"),
+                                    nextPoint.getDouble("lng")
+                            );
+                            currentShadowSegment.add(nextTMapPoint); // 맨 뒤에 추가
+                        }
+                    }
                 } else {
-                    // 그림자 구간이 끝나면 오버레이 폴리라인 생성
-                    if (currentShadowSegment.size() >= 2) {
+                    // *** 1개 포인트도 구간으로 생성 ***
+                    if (currentShadowSegment.size() >= 1) {
                         createShadowOverlayPolyLine(currentShadowSegment, routeIndex, shadowSegmentCount++);
+                        Log.d(TAG, "그림자 구간 생성: " + shadowSegmentCount + "번째, 포인트 수=" + currentShadowSegment.size());
                     }
                     currentShadowSegment.clear();
                 }
             }
 
             // 마지막 그림자 구간 처리
-            if (currentShadowSegment.size() >= 2) {
+            if (currentShadowSegment.size() >= 1) {
                 createShadowOverlayPolyLine(currentShadowSegment, routeIndex, shadowSegmentCount);
+                Log.d(TAG, "마지막 그림자 구간 생성: 포인트 수=" + currentShadowSegment.size());
             }
 
-            Log.d(TAG, "그림자 오버레이 생성 완료: " + shadowSegments.size() + "개 구간");
+            Log.d(TAG, "그림자 오버레이 생성 완료: 총 " + totalShadowPoints + "개 그림자 포인트, " + shadowSegmentCount + "개 구간");
 
         } catch (Exception e) {
             Log.e(TAG, "그림자 오버레이 생성 오류: " + e.getMessage(), e);
