@@ -18,6 +18,12 @@ public class RoutePoint {
         this.inShadow = false; // 생성자에서도 명시적 설정
     }
 
+    public RoutePoint(double lat, double lng) {
+        this.lat = lat;
+        this.lng = lng;
+        this.inShadow = false;
+    }
+
     public RoutePoint(double lat, double lng, boolean inShadow) {
         this.lat = lat;
         this.lng = lng;
