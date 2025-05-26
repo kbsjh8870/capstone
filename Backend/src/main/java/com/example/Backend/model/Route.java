@@ -22,7 +22,7 @@ public class Route {
     @JsonProperty("duration")
     private int duration; // 분
 
-    @JsonProperty("isBasicRoute")
+    @JsonProperty("basicRoute")
     private boolean isBasicRoute; // 기본 경로 여부
 
     @JsonProperty("avoidShadow")
