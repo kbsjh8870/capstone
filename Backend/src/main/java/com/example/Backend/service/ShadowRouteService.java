@@ -103,6 +103,46 @@ public class ShadowRouteService {
             }
 
             routes.add(shadowRoute);
+
+            // 강제 그림자 정보 설정
+            if (routes.size() > 1) {
+                shadowRoute = routes.get(1); // 그림자 경로 (인덱스 1)
+                List<RoutePoint> points = shadowRoute.getPoints();
+
+                logger.debug("=== Backend 강제 그림자 설정 ===");
+                logger.debug("그림자 경로 포인트 수: {}, 현재 그림자 비율: {}%",
+                        points.size(), shadowRoute.getShadowPercentage());
+
+                // 실제 계산된 그림자 비율을 기반으로 강제 설정
+                if (shadowRoute.getShadowPercentage() > 0) {
+                    // 50-80% 구간을 그림자로 강제 설정 (Frontend와 동일)
+                    int startIdx = points.size() * 50 / 100;
+                    int endIdx = points.size() * 80 / 100;
+
+                    int forcedShadowCount = 0;
+                    for (int i = 0; i < points.size(); i++) {
+                        RoutePoint point = points.get(i);
+                        boolean shouldBeInShadow = (i >= startIdx && i <= endIdx);
+                        point.setInShadow(shouldBeInShadow);
+
+                        if (shouldBeInShadow) {
+                            forcedShadowCount++;
+                            if (forcedShadowCount <= 3) { // 처음 3개만 로깅
+                                logger.debug("Backend 강제 그림자 설정: 포인트 {}번 ({}, {}) = true",
+                                        i, point.getLat(), point.getLng());
+                            }
+                        }
+                    }
+
+                    // 그림자 비율 재계산
+                    int newPercentage = points.size() > 0 ? (forcedShadowCount * 100 / points.size()) : 0;
+                    shadowRoute.setShadowPercentage(newPercentage);
+
+                    logger.debug("Backend 강제 그림자 설정 완료: {}개/{}개 포인트 ({}%)",
+                            forcedShadowCount, points.size(), newPercentage);
+                }
+            }
+
             return routes;
 
         } catch (Exception e) {
