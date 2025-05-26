@@ -300,24 +300,30 @@ public class ShadowRouteService {
         try {
             // 1. 정확한 포함 확인
             String containsSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
-            boolean exactContains = jdbcTemplate.queryForObject(containsSql, Boolean.class,
+            Boolean exactContains = jdbcTemplate.queryForObject(containsSql, Boolean.class,
                     mergedShadows, point.getLng(), point.getLat());
 
-            if (exactContains) return true;
+            if (exactContains != null && exactContains) {
+                return true;
+            }
 
             // 2. 더 관대한 거리 기반 확인 (100m 이내)
             String distanceSql = "SELECT ST_DWithin(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326), 0.001)";
-            boolean nearShadow = jdbcTemplate.queryForObject(distanceSql, Boolean.class,
+            Boolean nearShadow = jdbcTemplate.queryForObject(distanceSql, Boolean.class,
                     mergedShadows, point.getLng(), point.getLat());
 
-            if (nearShadow) {
-                logger.debug("포인트 ({}, {})가 그림자 100m 이내에 있음", point.getLat(), point.getLng());
+            // 처음 5개 포인트만 상세 로깅
+            int debugCount = 0;
+            if (debugCount < 5) {
+                logger.debug("관대한 그림자 확인: 포인트({}, {}), 정확포함={}, 근거리={}",
+                        point.getLat(), point.getLng(), exactContains, nearShadow);
+                debugCount++;
             }
 
-            return nearShadow;
+            return nearShadow != null && nearShadow;
 
         } catch (Exception e) {
-            logger.warn("그림자 확인 실패: " + e.getMessage());
+            logger.warn("관대한 그림자 확인 실패: " + e.getMessage());
             return false;
         }
     }
@@ -499,8 +505,18 @@ public class ShadowRouteService {
     private boolean checkPointInShadow(RoutePoint point, String mergedShadows) {
         try {
             String sql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
-            return jdbcTemplate.queryForObject(sql, Boolean.class,
+            Boolean result = jdbcTemplate.queryForObject(sql, Boolean.class,
                     mergedShadows, point.getLng(), point.getLat());
+
+            // 처음 3개 포인트만 상세 로깅
+            int debugCount = 0;
+            if (debugCount < 3) {
+                logger.debug("그림자 확인 상세: 포인트({}, {}), SQL결과={}",
+                        point.getLat(), point.getLng(), result);
+                debugCount++;
+            }
+
+            return result != null && result;
         } catch (Exception e) {
             logger.warn("그림자 확인 실패: " + e.getMessage());
             return false;
@@ -1136,7 +1152,12 @@ public class ShadowRouteService {
         List<RoutePoint> points = route.getPoints();
 
         if (shadowAreas.isEmpty()) {
+            // 그림자 영역이 없으면 모든 포인트를 햇빛으로 설정
+            for (RoutePoint point : points) {
+                point.setInShadow(false);
+            }
             route.setShadowPercentage(0);
+            logger.debug("그림자 영역이 없음. 모든 포인트를 햇빛으로 설정");
             return;
         }
 
@@ -1144,35 +1165,55 @@ public class ShadowRouteService {
             String mergedShadows = createShadowUnion(shadowAreas);
 
             if (mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}")) {
+                // 빈 그림자 영역이면 모든 포인트를 햇빛으로 설정
+                for (RoutePoint point : points) {
+                    point.setInShadow(false);
+                }
                 route.setShadowPercentage(0);
+                logger.debug("빈 그림자 영역. 모든 포인트를 햇빛으로 설정");
                 return;
             }
 
-            // 모든 포인트 확인 (샘플링 없이)
+            // *** 핵심 수정: 모든 포인트 확인 (샘플링 제거) ***
             int shadowCount = 0;
 
-            for (int i = 0; i < points.size(); i += 5) { // 5개마다 샘플링
+            for (int i = 0; i < points.size(); i++) {
                 RoutePoint point = points.get(i);
                 boolean isInShadow = checkPointInShadowRelaxed(point, mergedShadows);
 
                 point.setInShadow(isInShadow);
                 if (isInShadow) {
                     shadowCount++;
-                    logger.debug("그림자 포인트 발견: idx={}, 위치=({}, {})",
-                            i, point.getLat(), point.getLng());
+
+                    // 처음 5개 그림자 포인트만 로깅
+                    if (shadowCount <= 5) {
+                        logger.debug("그림자 포인트 발견: idx={}, 위치=({}, {})",
+                                i, point.getLat(), point.getLng());
+                    }
+                }
+
+                // 진행상황 로깅 (50포인트마다)
+                if ((i + 1) % 50 == 0 || (i + 1) >= points.size()) {
+                    logger.debug("그림자 확인 진행: {}/{} 완료", i + 1, points.size());
                 }
             }
 
-            int sampledPoints = (points.size() + 4) / 5; // 샘플 포인트 수
-            int shadowPercentage = sampledPoints > 0 ? (shadowCount * 100 / sampledPoints) : 0;
-
+            int shadowPercentage = points.size() > 0 ? (shadowCount * 100 / points.size()) : 0;
             route.setShadowPercentage(shadowPercentage);
 
-            logger.debug("관대한 그림자 비율 계산 완료: {}% ({}/{}개 포인트)",
-                    shadowPercentage, shadowCount, sampledPoints);
+            logger.info("관대한 그림자 비율 계산 완료: {}% ({}/{}개 포인트)",
+                    shadowPercentage, shadowCount, points.size());
+
+            // 그림자 분포 패턴 로깅 (디버깅용)
+            logShadowDistribution(points);
 
         } catch (Exception e) {
             logger.error("관대한 그림자 비율 계산 오류: " + e.getMessage(), e);
+/*
+            // 오류 시 모든 포인트를 햇빛으로 설정
+            for (RoutePoint point : points) {
+                point.setInShadow(false);
+            }*/
             route.setShadowPercentage(0);
         }
     }
