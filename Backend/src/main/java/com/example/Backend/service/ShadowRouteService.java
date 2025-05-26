@@ -1459,6 +1459,8 @@ public class ShadowRouteService {
                         RoutePoint point = new RoutePoint();
                         point.setLat(lat);
                         point.setLng(lng);
+                        // *** 중요: 초기값을 false로 명시적 설정 ***
+                        point.setInShadow(false);
                         points.add(point);
                     }
                 }
@@ -1467,6 +1469,8 @@ public class ShadowRouteService {
             route.setPoints(points);
             route.setDistance(totalDistance);
             route.setDuration(totalDuration / 60); // 초 -> 분 변환
+
+            logger.debug("T맵 경로 파싱 완료: {}개 포인트, 거리={}m", points.size(), totalDistance);
 
         } catch (Exception e) {
             logger.error("경로 파싱 오류: " + e.getMessage(), e);
