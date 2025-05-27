@@ -164,11 +164,11 @@ public class ShadowRouteService {
             // 태양 위치 기반 우회 방향 결정
             double targetDirection;
             if (avoidShadow) {
-            // 그림자 회피: 태양 반대 방향으로 대폭 우회 (그림자 있는 곳 피하기)
-            targetDirection = (sunPos.getAzimuth() + 180) % 360;
+                // 그림자 회피: 태양이 있는 방향으로 우회 (햇빛이 있는 곳으로)
+                targetDirection = sunPos.getAzimuth();
             } else {
-            // 그림자 선호: 태양이 있는 방향으로 대폭 우회 (그림자 반대편)
-            targetDirection = sunPos.getAzimuth();
+                // 그림자 선호: 태양 반대 방향으로 우회 (그림자가 있는 곳으로)
+                targetDirection = (sunPos.getAzimuth() + 180) % 360;
             }
 
             // 태양 고도에 따른 우회 거리 조정
@@ -211,13 +211,13 @@ public class ShadowRouteService {
 
         if (altitude < 15) {
             // 저녁/새벽: 그림자가 길어서 더 큰 우회 필요
-            return 300.0;
+            return 200.0;
         } else if (altitude < 45) {
             // 오전/오후: 중간 우회
-            return 200.0;
+            return 150.0;
         } else {
             // 정오: 그림자가 짧아서 소형 우회
-            return 150.0;
+            return 100.0;
         }
     }
 
@@ -225,10 +225,10 @@ public class ShadowRouteService {
      * 경로 품질 검증
      */
     private boolean isRouteQualityAcceptable(Route baseRoute, Route shadowRoute) {
-        // 거리 차이가 기본 경로의 20% 이내인지 확인
+        // 거리 차이가 기본 경로의 15% 이내인지 확인
         double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
 
-        if (distanceRatio > 1.2) {
+        if (distanceRatio > 1.15) {
             logger.debug("경로가 너무 멀어짐: 기본={}m, 그림자={}m ({}% 증가)",
                     (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
                     (int)((distanceRatio - 1) * 100));
