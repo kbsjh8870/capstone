@@ -211,12 +211,12 @@ public class ShadowRouteService {
 
         if (altitude < 15) {
             // 저녁/새벽: 그림자가 길어서 더 큰 우회 필요
-            return 1000.0;
+            return 400.0;
         } else if (altitude < 45) {
             // 오전/오후: 중간 우회
-            return 500.0;
+            return 300.0;
         } else {
-            // 정오: 그림자가 짧아서 중간 우회
+            // 정오: 그림자가 짧아서 소형 우회
             return 200.0;
         }
     }
@@ -225,10 +225,10 @@ public class ShadowRouteService {
      * 경로 품질 검증
      */
     private boolean isRouteQualityAcceptable(Route baseRoute, Route shadowRoute) {
-        // 거리 차이가 기본 경로의 60% 이내인지 확인
+        // 거리 차이가 기본 경로의 30% 이내인지 확인
         double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
 
-        if (distanceRatio > 1.6) {
+        if (distanceRatio > 1.3) {
             logger.debug("경로가 너무 멀어짐: 기본={}m, 그림자={}m ({}% 증가)",
                     (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
                     (int)((distanceRatio - 1) * 100));
