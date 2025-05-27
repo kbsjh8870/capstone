@@ -164,11 +164,11 @@ public class ShadowRouteService {
             // 태양 위치 기반 우회 방향 결정
             double targetDirection;
             if (avoidShadow) {
-                // 그림자 회피: 태양이 있는 방향으로 대폭 우회 (그림자 반대편)
-                targetDirection = sunPos.getAzimuth();
+            // 그림자 회피: 태양 반대 방향으로 대폭 우회 (그림자 있는 곳 피하기)
+            targetDirection = (sunPos.getAzimuth() + 180) % 360;
             } else {
-                // 그림자 선호: 태양 반대 방향으로 대폭 우회 (그림자 있는 곳)
-                targetDirection = (sunPos.getAzimuth() + 180) % 360;
+            // 그림자 선호: 태양이 있는 방향으로 대폭 우회 (그림자 반대편)
+            targetDirection = sunPos.getAzimuth();
             }
 
             // 태양 고도에 따른 우회 거리 조정
@@ -214,10 +214,10 @@ public class ShadowRouteService {
             return 1000.0;
         } else if (altitude < 45) {
             // 오전/오후: 중간 우회
-            return 800.0;
+            return 500.0;
         } else {
             // 정오: 그림자가 짧아서 중간 우회
-            return 600.0;
+            return 200.0;
         }
     }
 
