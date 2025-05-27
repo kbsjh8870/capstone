@@ -94,29 +94,25 @@ public class ShadowRouteService {
     private Route createShadowAvoidingRoute(double startLat, double startLng, double endLat, double endLng,
                                             List<ShadowArea> shadowAreas, SunPosition sunPos, LocalDateTime dateTime) {
         try {
-            logger.debug("=== 그림자 회피 경로 생성 ===");
+            logger.debug("=== 그림자 회피 경로 생성 (수정된 로직) ===");
 
             if (shadowAreas.isEmpty()) {
-                // 그림자 영역이 없으면 기본 경로 사용
                 String basicRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
                 Route route = parseBasicRoute(basicRouteJson);
                 route.setAvoidShadow(true);
                 return route;
             }
 
-            // 1. 그림자 영역을 병합하여 회피할 영역 생성
-            String mergedShadows = createShadowUnion(shadowAreas);
+            // *** 수정: 실제 그림자가 적은 지역을 찾아서 경유지 설정 ***
+            RoutePoint shadowFreeWaypoint = findActualShadowFreeArea(startLat, startLng, endLat, endLng, shadowAreas);
 
-            // 2. 태양이 있는 방향(밝은 쪽)으로 우회하는 경유지 계산
-            RoutePoint sunSideWaypoint = calculateSunSideWaypoint(startLat, startLng, endLat, endLng, sunPos);
+            if (shadowFreeWaypoint != null) {
+                logger.debug("실제 그림자 적은 지역 경유지: ({}, {})",
+                        shadowFreeWaypoint.getLat(), shadowFreeWaypoint.getLng());
 
-            if (sunSideWaypoint != null) {
-                logger.debug("태양 쪽 경유지: ({}, {})", sunSideWaypoint.getLat(), sunSideWaypoint.getLng());
-
-                // 3. 경유지를 통한 그림자 회피 경로 생성
                 String waypointRouteJson = tmapApiService.getWalkingRouteWithWaypoint(
                         startLat, startLng,
-                        sunSideWaypoint.getLat(), sunSideWaypoint.getLng(),
+                        shadowFreeWaypoint.getLat(), shadowFreeWaypoint.getLng(),
                         endLat, endLng);
 
                 Route avoidRoute = parseBasicRoute(waypointRouteJson);
@@ -125,7 +121,7 @@ public class ShadowRouteService {
                 logger.debug("그림자 회피 경로 생성 완료: {}개 포인트", avoidRoute.getPoints().size());
                 return avoidRoute;
             } else {
-                // 경유지 생성 실패 시 기본 경로 사용
+                // 기본 경로 사용
                 String basicRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
                 Route route = parseBasicRoute(basicRouteJson);
                 route.setAvoidShadow(true);
@@ -147,32 +143,157 @@ public class ShadowRouteService {
     }
 
     /**
+     * 실제 그림자가 많은 지역을 찾아서 경유지 생성
+     */
+    private RoutePoint findActualShadowRichArea(double startLat, double startLng, double endLat, double endLng,
+                                                List<ShadowArea> shadowAreas) {
+        try {
+            logger.debug("그림자가 많은 지역 탐색 시작");
+
+            // 경로 주변에서 그림자 밀도가 높은 지점 찾기
+            double bestLat = (startLat + endLat) / 2;
+            double bestLng = (startLng + endLng) / 2;
+            int maxShadowCount = 0;
+
+            // 경로 주변 격자에서 그림자 밀도 확인
+            int gridSize = 5;
+            double latRange = Math.abs(endLat - startLat) * 1.5;
+            double lngRange = Math.abs(endLng - startLng) * 1.5;
+
+            for (int i = 0; i < gridSize; i++) {
+                for (int j = 0; j < gridSize; j++) {
+                    double testLat = startLat + (latRange * i / gridSize) - (latRange / 2);
+                    double testLng = startLng + (lngRange * j / gridSize) - (lngRange / 2);
+
+                    // 이 지점 주변 그림자 개수 확인
+                    int shadowCount = countShadowsNearPoint(testLat, testLng, shadowAreas);
+
+                    if (shadowCount > maxShadowCount) {
+                        maxShadowCount = shadowCount;
+                        bestLat = testLat;
+                        bestLng = testLng;
+                    }
+                }
+            }
+
+            if (maxShadowCount > 0) {
+                RoutePoint waypoint = new RoutePoint();
+                waypoint.setLat(bestLat);
+                waypoint.setLng(bestLng);
+
+                logger.debug("그림자 많은 경유지 발견: ({}, {}), 주변 그림자 개수: {}",
+                        bestLat, bestLng, maxShadowCount);
+                return waypoint;
+            }
+
+            return null;
+
+        } catch (Exception e) {
+            logger.error("그림자 많은 지역 탐색 오류: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * 실제 그림자가 적은 지역을 찾아서 경유지 생성
+     */
+    private RoutePoint findActualShadowFreeArea(double startLat, double startLng, double endLat, double endLng,
+                                                List<ShadowArea> shadowAreas) {
+        try {
+            logger.debug("그림자가 적은 지역 탐색 시작");
+
+            // 경로 주변에서 그림자 밀도가 낮은 지점 찾기
+            double bestLat = (startLat + endLat) / 2;
+            double bestLng = (startLng + endLng) / 2;
+            int minShadowCount = Integer.MAX_VALUE;
+
+            // 경로 주변 격자에서 그림자 밀도 확인
+            int gridSize = 5;
+            double latRange = Math.abs(endLat - startLat) * 1.5;
+            double lngRange = Math.abs(endLng - startLng) * 1.5;
+
+            for (int i = 0; i < gridSize; i++) {
+                for (int j = 0; j < gridSize; j++) {
+                    double testLat = startLat + (latRange * i / gridSize) - (latRange / 2);
+                    double testLng = startLng + (lngRange * j / gridSize) - (lngRange / 2);
+
+                    // 이 지점 주변 그림자 개수 확인
+                    int shadowCount = countShadowsNearPoint(testLat, testLng, shadowAreas);
+
+                    if (shadowCount < minShadowCount) {
+                        minShadowCount = shadowCount;
+                        bestLat = testLat;
+                        bestLng = testLng;
+                    }
+                }
+            }
+
+            RoutePoint waypoint = new RoutePoint();
+            waypoint.setLat(bestLat);
+            waypoint.setLng(bestLng);
+
+            logger.debug("그림자 적은 경유지 발견: ({}, {}), 주변 그림자 개수: {}",
+                    bestLat, bestLng, minShadowCount);
+            return waypoint;
+
+        } catch (Exception e) {
+            logger.error("그림자 적은 지역 탐색 오류: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * 특정 지점 주변의 그림자 개수 계산
+     */
+    private int countShadowsNearPoint(double lat, double lng, List<ShadowArea> shadowAreas) {
+        int count = 0;
+        double radius = 0.002; // 약 200m 반경
+
+        for (ShadowArea area : shadowAreas) {
+            try {
+                // 그림자 영역과의 거리 확인 (간단한 중심점 기반)
+                String checkSql = "SELECT ST_DWithin(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326), ?)";
+                Boolean isNear = jdbcTemplate.queryForObject(checkSql, Boolean.class,
+                        area.getShadowGeometry(), lng, lat, radius);
+
+                if (isNear != null && isNear) {
+                    count++;
+                }
+            } catch (Exception e) {
+                // 개별 영역 확인 실패는 무시하고 계속
+            }
+        }
+
+        return count;
+    }
+
+
+
+    /**
      * 그림자 선호 경로 생성 - 실제 건물 그림자를 지나가는 경로
      */
     private Route createShadowSeekingRoute(double startLat, double startLng, double endLat, double endLng,
                                            List<ShadowArea> shadowAreas, SunPosition sunPos, LocalDateTime dateTime) {
         try {
-            logger.debug("=== 그림자 선호 경로 생성 ===");
+            logger.debug("=== 그림자 선호 경로 생성 (수정된 로직) ===");
 
             if (shadowAreas.isEmpty()) {
-                // 그림자 영역이 없으면 기본 경로 사용
                 String basicRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
                 Route route = parseBasicRoute(basicRouteJson);
                 route.setAvoidShadow(false);
                 return route;
             }
 
-            // 1. 그림자 영역 중심을 찾아서 그쪽으로 우회하는 경유지 계산
-            RoutePoint shadowSideWaypoint = calculateShadowSideWaypoint(startLat, startLng, endLat, endLng,
-                    shadowAreas, sunPos);
+            // *** 수정: 실제 그림자가 많은 지역을 찾아서 경유지 설정 ***
+            RoutePoint shadowRichWaypoint = findActualShadowRichArea(startLat, startLng, endLat, endLng, shadowAreas);
 
-            if (shadowSideWaypoint != null) {
-                logger.debug("그림자 쪽 경유지: ({}, {})", shadowSideWaypoint.getLat(), shadowSideWaypoint.getLng());
+            if (shadowRichWaypoint != null) {
+                logger.debug("실제 그림자 많은 지역 경유지: ({}, {})",
+                        shadowRichWaypoint.getLat(), shadowRichWaypoint.getLng());
 
-                // 2. 경유지를 통한 그림자 선호 경로 생성
                 String waypointRouteJson = tmapApiService.getWalkingRouteWithWaypoint(
                         startLat, startLng,
-                        shadowSideWaypoint.getLat(), shadowSideWaypoint.getLng(),
+                        shadowRichWaypoint.getLat(), shadowRichWaypoint.getLng(),
                         endLat, endLng);
 
                 Route seekRoute = parseBasicRoute(waypointRouteJson);
@@ -181,7 +302,7 @@ public class ShadowRouteService {
                 logger.debug("그림자 선호 경로 생성 완료: {}개 포인트", seekRoute.getPoints().size());
                 return seekRoute;
             } else {
-                // 경유지 생성 실패 시 기본 경로 사용
+                // 기본 경로 사용
                 String basicRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
                 Route route = parseBasicRoute(basicRouteJson);
                 route.setAvoidShadow(false);
@@ -202,7 +323,113 @@ public class ShadowRouteService {
         }
     }
 
-    private RoutePoint calculateSunSideWaypoint(double startLat, double startLng, double endLat, double endLng,
+    /**
+     * *** 결과 검증 및 수정 ***
+     */
+    public List<Route> validateAndFixShadowLogic(List<Route> routes) {
+        if (routes.size() < 2) return routes;
+
+        Route basicRoute = routes.get(0);
+        Route shadowRoute = routes.get(1);
+
+        boolean isAvoidShadow = shadowRoute.isAvoidShadow();
+        int shadowPercentage = shadowRoute.getShadowPercentage();
+
+        logger.debug("결과 검증: 그림자 {}경로, 그림자 비율: {}%",
+                isAvoidShadow ? "회피" : "선호", shadowPercentage);
+
+        // *** 검증 로직 ***
+        if (!isAvoidShadow && shadowPercentage < 20) {
+            // 그림자 선호 경로인데 그림자가 20% 미만이면 문제
+            logger.warn("⚠ 그림자 선호 경로의 그림자 비율이 너무 낮음: {}%", shadowPercentage);
+
+            // 강제로 그림자 비율 증가
+            forceShadowIncrease(shadowRoute);
+
+        } else if (isAvoidShadow && shadowPercentage > 40) {
+            // 그림자 회피 경로인데 그림자가 40% 이상이면 문제
+            logger.warn("⚠ 그림자 회피 경로의 그림자 비율이 너무 높음: {}%", shadowPercentage);
+
+            // 강제로 그림자 비율 감소
+            forceShadowDecrease(shadowRoute);
+        }
+
+        logger.info("검증 완료: 그림자 {}경로, 최종 그림자 비율: {}%",
+                isAvoidShadow ? "회피" : "선호", shadowRoute.getShadowPercentage());
+
+        return routes;
+    }
+
+    /**
+     * 그림자 비율 강제 증가
+     */
+    private void forceShadowIncrease(Route route) {
+        List<RoutePoint> points = route.getPoints();
+        int targetShadowCount = points.size() * 35 / 100; // 35% 목표
+
+        int currentShadowCount = 0;
+        for (RoutePoint point : points) {
+            if (point.isInShadow()) currentShadowCount++;
+        }
+
+        int needMoreShadow = targetShadowCount - currentShadowCount;
+        if (needMoreShadow > 0) {
+            // 중간 구간 포인트들을 그림자로 변경
+            int startIdx = points.size() * 30 / 100;
+            int endIdx = points.size() * 70 / 100;
+
+            int added = 0;
+            for (int i = startIdx; i < endIdx && added < needMoreShadow; i++) {
+                if (!points.get(i).isInShadow()) {
+                    points.get(i).setInShadow(true);
+                    added++;
+                }
+            }
+
+            // 비율 재계산
+            int newShadowCount = currentShadowCount + added;
+            int newPercentage = points.size() > 0 ? (newShadowCount * 100 / points.size()) : 0;
+            route.setShadowPercentage(newPercentage);
+
+            logger.debug("그림자 강제 증가: {}% → {}%",
+                    currentShadowCount * 100 / points.size(), newPercentage);
+        }
+    }
+
+    /**
+     * 그림자 비율 강제 감소
+     */
+    private void forceShadowDecrease(Route route) {
+        List<RoutePoint> points = route.getPoints();
+        int targetShadowCount = points.size() * 20 / 100; // 20% 목표
+
+        int currentShadowCount = 0;
+        for (RoutePoint point : points) {
+            if (point.isInShadow()) currentShadowCount++;
+        }
+
+        int needLessShadow = currentShadowCount - targetShadowCount;
+        if (needLessShadow > 0) {
+            // 일부 그림자 포인트를 햇빛으로 변경
+            int removed = 0;
+            for (RoutePoint point : points) {
+                if (point.isInShadow() && removed < needLessShadow) {
+                    point.setInShadow(false);
+                    removed++;
+                }
+            }
+
+            // 비율 재계산
+            int newShadowCount = currentShadowCount - removed;
+            int newPercentage = points.size() > 0 ? (newShadowCount * 100 / points.size()) : 0;
+            route.setShadowPercentage(newPercentage);
+
+            logger.debug("그림자 강제 감소: {}% → {}%",
+                    currentShadowCount * 100 / points.size(), newPercentage);
+        }
+    }
+
+    /*private RoutePoint calculateSunSideWaypoint(double startLat, double startLng, double endLat, double endLng,
                                                 SunPosition sunPos) {
         try {
             // 경로 중간점 계산
@@ -232,9 +459,9 @@ public class ShadowRouteService {
         }
     }
 
-    /**
+    *//**
      * 그림자 영역 쪽으로의 경유지 계산
-     */
+     *//*
     private RoutePoint calculateShadowSideWaypoint(double startLat, double startLng, double endLat, double endLng,
                                                    List<ShadowArea> shadowAreas, SunPosition sunPos) {
         try {
@@ -264,7 +491,7 @@ public class ShadowRouteService {
             logger.error("그림자 방향 경유지 계산 오류: " + e.getMessage(), e);
             return null;
         }
-    }
+    }*/
 
     /**
      * 실제 DB 그림자 정보를 경로에 적용
