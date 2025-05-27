@@ -83,8 +83,6 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     private static final int COLOR_BASIC_ROUTE = Color.parseColor("#2196F3");  // 파란색 - 기본 경로
     private static final int COLOR_AVOID_SHADOW = Color.parseColor("#FF5722"); // 주황색 - 그림자 회피 경로
     private static final int COLOR_FOLLOW_SHADOW = Color.parseColor("#9C27B0"); // 보라색 - 그림자 따라가기 경로
-    private static final int COLOR_SHADOW_SEGMENT = Color.parseColor("#424242"); // 어두운 회색 - 그림자 구간
-    private static final int COLOR_SUNNY_SEGMENT = Color.parseColor("#FFC107"); // 노란색 - 햇빛 구간
 
     private boolean isInitialRouteDisplay = true;
 
@@ -904,6 +902,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         // 모든 경로 제거
         tMapView.removeAllTMapPolyLine();
 
+        // 현재 경로 색상을 저장할 변수
+        int currentRouteColor = COLOR_BASIC_ROUTE;
+
         // 그림자 경로만 표시 (routes 리스트에서 인덱스 1 이상)
         for (int i = 1; i < routes.size(); i++) {
             TMapPolyLine route = routes.get(i);
@@ -938,9 +939,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
         View legendSunny = findViewById(R.id.legend_sunny);
         if (avoidShadow) {
-            legendSunny.setBackgroundColor(COLOR_AVOID_SHADOW); // 주황색
+            legendSunny.setBackgroundColor(Color.parseColor("#9C27B0"));
         } else {
-            legendSunny.setBackgroundColor(COLOR_FOLLOW_SHADOW); // 보라색
+            legendSunny.setBackgroundColor(Color.parseColor("#822AC2"));
         }
 
         Log.d(TAG, "실제 DB 그림자 범례 표시 완료");
