@@ -307,49 +307,31 @@ public class ShadowRouteService {
         if (basePoints.size() < 5) return null;
 
         try {
-            // 경로 중간점과 목적지 방향 계산
             RoutePoint startPoint = basePoints.get(0);
             RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
             RoutePoint middlePoint = basePoints.get(basePoints.size() / 2);
 
-            //  목적지 방향 계산
+            // 목적지 방향 계산
             double destinationDirection = calculateDirection(startPoint, endPoint);
 
-            logger.debug("경로 분석: 시작=({}, {}), 끝=({}, {}), 중간=({}, {})",
-                    startPoint.getLat(), startPoint.getLng(),
-                    endPoint.getLat(), endPoint.getLng(),
-                    middlePoint.getLat(), middlePoint.getLng());
-            logger.debug("목적지 방향: {}도", destinationDirection);
+            // avoidShadow 여부에 따라 명확히 다른 전략 적용
+            double targetDirection;
+            double detourMeters;
 
-            // 목적지 방향 기준 허용 우회 범위 설정 (±90도)
-            double minAllowedDirection = (destinationDirection - 90 + 360) % 360;
-            double maxAllowedDirection = (destinationDirection + 90) % 360;
-
-            logger.debug("허용 우회 범위: {}도 ~ {}도", minAllowedDirection, maxAllowedDirection);
-
-            // 태양 위치 기반 초기 방향 계산
-            double solarTargetDirection;
             if (avoidShadow) {
-                // 그림자 회피: 태양 방향
-                solarTargetDirection = sunPos.getAzimuth();
+                // 그림자 회피: 태양 방향으로 우회
+                targetDirection = determineAvoidShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
+                detourMeters = 200.0; // 더 큰 우회
+                logger.debug("그림자 회피 모드: 태양방향 기준 우회={}도", targetDirection);
             } else {
-                // 그림자 선호: 태양 반대 방향
-                solarTargetDirection = (sunPos.getAzimuth() + 180) % 360;
+                // 그림자 선호: 태양 반대 방향으로 우회
+                targetDirection = determineFollowShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
+                detourMeters = 250.0; // 더욱 큰 우회로 그림자 찾기
+                logger.debug("그림자 선호 모드: 그림자 밀집 지역 우회={}도", targetDirection);
             }
 
-            logger.debug("태양 기반 초기 방향: {}도 (avoidShadow={})", solarTargetDirection, avoidShadow);
-
-            //  최종 우회 방향 결정
-            double finalDirection = determineSmartDetourDirection(
-                    middlePoint, shadowAreas, sunPos, avoidShadow,
-                    destinationDirection, solarTargetDirection,
-                    minAllowedDirection, maxAllowedDirection);
-
-            // 태양 고도에 따른 우회 거리 조정 (더 보수적으로)
-            double detourMeters = calculateConservativeDetourDistance(sunPos, destinationDirection, finalDirection);
-
             // 지리적 좌표로 변환
-            double directionRad = Math.toRadians(finalDirection);
+            double directionRad = Math.toRadians(targetDirection);
             double latDegreeInMeters = 111000.0;
             double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
 
@@ -366,16 +348,122 @@ public class ShadowRouteService {
                 return null;
             }
 
-            logger.debug("스마트 경유지 생성: 목적지방향={}도, 최종우회방향={}도, 우회거리={}m",
-                    destinationDirection, finalDirection, detourMeters);
+            logger.debug("차별화된 경유지 생성: avoidShadow={}, 방향={}도, 거리={}m",
+                    avoidShadow, targetDirection, detourMeters);
 
             return waypoint;
 
         } catch (Exception e) {
-            logger.error("스마트 경유지 계산 오류: " + e.getMessage(), e);
+            logger.error("차별화된 경유지 계산 오류: " + e.getMessage(), e);
             return null;
         }
     }
+
+    private double determineAvoidShadowDirection(SunPosition sunPos, double destinationDirection,
+                                                 List<ShadowArea> shadowAreas, RoutePoint centerPoint) {
+        // 1순위: 태양 방향 (햇빛이 있는 곳)
+        double sunDirection = sunPos.getAzimuth();
+
+        // 2순위: 태양 방향 ±45도
+        double[] avoidCandidates = {
+                sunDirection,
+                (sunDirection + 45) % 360,
+                (sunDirection - 45 + 360) % 360,
+                (sunDirection + 90) % 360,
+                (sunDirection - 90 + 360) % 360
+        };
+
+        // 목적지 방향과 너무 반대되지 않는 방향 선택 (±135도 내에서)
+        for (double candidate : avoidCandidates) {
+            double angleDiff = Math.min(Math.abs(candidate - destinationDirection),
+                    360 - Math.abs(candidate - destinationDirection));
+
+            if (angleDiff <= 135) { // 목적지 방향 ±135도 범위
+                logger.debug("그림자 회피 방향 선택: {}도 (태양={}도, 목적지={}도)",
+                        candidate, sunDirection, destinationDirection);
+                return candidate;
+            }
+        }
+
+        // 모든 후보가 불가능하면 태양 방향 사용
+        return sunDirection;
+    }
+
+    private double determineFollowShadowDirection(SunPosition sunPos, double destinationDirection,
+                                                  List<ShadowArea> shadowAreas, RoutePoint centerPoint) {
+        // 1순위: 태양 반대 방향 (그림자가 있는 곳)
+        double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
+
+        // 2순위: 실제 그림자 밀집 지역 찾기
+        double optimalShadowDirection = findDensestShadowDirection(centerPoint, shadowAreas, shadowDirection);
+
+        // 3순위: 태양 반대 방향 ±45도
+        double[] shadowCandidates = {
+                optimalShadowDirection,
+                shadowDirection,
+                (shadowDirection + 45) % 360,
+                (shadowDirection - 45 + 360) % 360,
+                (shadowDirection + 90) % 360,
+                (shadowDirection - 90 + 360) % 360
+        };
+
+        // 목적지 방향과 너무 반대되지 않는 방향 선택 (±135도 내에서)
+        for (double candidate : shadowCandidates) {
+            double angleDiff = Math.min(Math.abs(candidate - destinationDirection),
+                    360 - Math.abs(candidate - destinationDirection));
+
+            if (angleDiff <= 135) { // 목적지 방향 ±135도 범위
+                logger.debug("그림자 선호 방향 선택: {}도 (그림자={}도, 목적지={}도)",
+                        candidate, shadowDirection, destinationDirection);
+                return candidate;
+            }
+        }
+
+        // 모든 후보가 불가능하면 그림자 방향 사용
+        return shadowDirection;
+    }
+
+    /**
+     *  가장 그림자가 밀집된 방향 찾기
+     */
+    private double findDensestShadowDirection(RoutePoint centerPoint, List<ShadowArea> shadowAreas, double baseShadowDirection) {
+        if (shadowAreas.isEmpty()) {
+            return baseShadowDirection;
+        }
+
+        try {
+            // 8방향에서 그림자 밀도 분석
+            double[] directions = {0, 45, 90, 135, 180, 225, 270, 315};
+            double[] shadowDensities = new double[8];
+            double maxDensity = 0;
+            int maxIndex = 4; // 기본값: 남쪽
+
+            for (int i = 0; i < directions.length; i++) {
+                double checkRadius = 300.0;
+                double dirRad = Math.toRadians(directions[i]);
+                double checkLat = centerPoint.getLat() + (checkRadius * Math.cos(dirRad)) / 111000.0;
+                double checkLng = centerPoint.getLng() + (checkRadius * Math.sin(dirRad)) /
+                        (111000.0 * Math.cos(Math.toRadians(centerPoint.getLat())));
+
+                shadowDensities[i] = calculateShadowDensityAtPoint(checkLat, checkLng, shadowAreas);
+
+                if (shadowDensities[i] > maxDensity) {
+                    maxDensity = shadowDensities[i];
+                    maxIndex = i;
+                }
+            }
+
+            double densestDirection = directions[maxIndex];
+            logger.debug("가장 그림자 밀집된 방향: {}도 (밀도={}%)", densestDirection, maxDensity);
+
+            return densestDirection;
+
+        } catch (Exception e) {
+            logger.error("그림자 밀집 방향 찾기 오류: " + e.getMessage(), e);
+            return baseShadowDirection;
+        }
+    }
+
 
     /**
      *  두 지점 간의 방향 계산 (도 단위)
@@ -625,18 +713,18 @@ public class ShadowRouteService {
      * 경로 품질 검증
      */
     private boolean isRouteQualityAcceptable(Route baseRoute, Route shadowRoute) {
-        // 거리 차이가 기본 경로의 15% 이내인지 확인
+        // 거리 차이가 기본 경로의 25% 이내인지 확인
         double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
 
-        if (distanceRatio > 1.15) {
+        if (distanceRatio > 1.25) {
             logger.debug("경로가 너무 멀어짐: 기본={}m, 그림자={}m ({}% 증가)",
                     (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
                     (int)((distanceRatio - 1) * 100));
             return false;
         }
 
-        // 포인트 수가 합리적인지 확인
-        if (shadowRoute.getPoints().size() < baseRoute.getPoints().size() * 0.5) {
+        // 포인트 수가 합리적인지 확인 (조건 완화)
+        if (shadowRoute.getPoints().size() < baseRoute.getPoints().size() * 0.3) {
             logger.debug("경로 포인트가 너무 적음");
             return false;
         }
