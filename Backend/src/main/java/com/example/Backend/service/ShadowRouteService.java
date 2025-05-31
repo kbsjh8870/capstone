@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -356,41 +357,99 @@ public class ShadowRouteService {
         }
 
         try {
-            String mergedShadows = createShadowUnion(shadowAreas);
             List<RoutePoint> points = route.getPoints();
-            int shadowCount = 0;
 
-            // 🔧 1차 검사: 기존 방식
-            for (RoutePoint point : points) {
-                boolean isInShadow = checkPointInShadowRelaxed(point, mergedShadows);
+            // 🚀 1차: 배치 처리로 기본 그림자 검사
+            Map<Integer, Boolean> basicShadowResults = batchCheckBasicShadows(points, shadowAreas);
+
+            // 1차 결과 적용
+            int basicShadowCount = 0;
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
+                boolean isInShadow = basicShadowResults.getOrDefault(i, false);
                 point.setInShadow(isInShadow);
-                if (isInShadow) shadowCount++;
+                if (isInShadow) basicShadowCount++;
             }
 
-            logger.debug("1차 그림자 검사 완료: {}개 포인트 감지", shadowCount);
+            logger.debug("1차 배치 그림자 검사 완료: {}개 포인트 감지", basicShadowCount);
 
-            // 🔧 2차 검사: 상세 분석으로 누락된 그림자 보완
+            // 🚀 2차: 배치 처리로 상세 분석
             analyzeRouteDetailedShadows(route, shadowAreas);
 
-            // 최종 통계
-            shadowCount = 0;
+            // 최종 통계 (analyzeRouteDetailedShadows에서 이미 계산됨)
+            int finalShadowCount = 0;
             for (RoutePoint point : points) {
-                if (point.isInShadow()) shadowCount++;
+                if (point.isInShadow()) finalShadowCount++;
             }
 
-            int shadowPercentage = points.size() > 0 ? (shadowCount * 100 / points.size()) : 0;
-            route.setShadowPercentage(shadowPercentage);
-
-            logger.info("최종 DB 그림자 정보 적용 완료: {}% ({}/{}개 포인트)",
-                    shadowPercentage, shadowCount, points.size());
+            logger.info("최종 배치 처리 완료: {}% ({}/{}개 포인트)",
+                    route.getShadowPercentage(), finalShadowCount, points.size());
 
         } catch (Exception e) {
-            logger.error("DB 그림자 정보 적용 오류: " + e.getMessage(), e);
+            logger.error("배치 처리 그림자 정보 적용 오류: " + e.getMessage(), e);
             for (RoutePoint point : route.getPoints()) {
                 point.setInShadow(false);
             }
             route.setShadowPercentage(0);
         }
+    }
+
+    /**
+     *  배치 처리로 기본 그림자 검사
+     */
+    private Map<Integer, Boolean> batchCheckBasicShadows(List<RoutePoint> points, List<ShadowArea> shadowAreas) {
+        Map<Integer, Boolean> results = new HashMap<>();
+
+        try {
+            String mergedShadows = createShadowUnion(shadowAreas);
+
+            // 모든 포인트를 MULTIPOINT로 변환
+            StringBuilder pointsWkt = new StringBuilder("MULTIPOINT(");
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
+                if (i > 0) pointsWkt.append(",");
+                pointsWkt.append(String.format("(%f %f)", point.getLng(), point.getLat()));
+            }
+            pointsWkt.append(")");
+
+            // 한 번의 쿼리로 모든 포인트 검사
+            String batchSql = """
+            WITH shadow_geom AS (
+                SELECT ST_GeomFromGeoJSON(?) as geom
+            ),
+            route_points AS (
+                SELECT 
+                    (ST_Dump(ST_GeomFromText(?, 4326))).geom as point_geom,
+                    generate_series(1, ST_NumGeometries(ST_GeomFromText(?, 4326))) as point_index
+            )
+            SELECT 
+                rp.point_index - 1 as index,
+                CASE 
+                    WHEN ST_Contains(sg.geom, rp.point_geom) THEN true
+                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0005) THEN true
+                    ELSE false
+                END as in_shadow
+            FROM route_points rp, shadow_geom sg
+            ORDER BY rp.point_index
+            """;
+
+            List<Map<String, Object>> batchResults = jdbcTemplate.queryForList(batchSql,
+                    mergedShadows, pointsWkt.toString(), pointsWkt.toString());
+
+            // 결과 매핑
+            for (Map<String, Object> row : batchResults) {
+                int index = ((Number) row.get("index")).intValue();
+                boolean inShadow = (Boolean) row.get("in_shadow");
+                results.put(index, inShadow);
+            }
+
+            logger.debug("배치 기본 그림자 검사 완료: {}개 포인트 처리", results.size());
+
+        } catch (Exception e) {
+            logger.error("배치 기본 그림자 검사 오류: " + e.getMessage(), e);
+        }
+
+        return results;
     }
 
     /**
@@ -440,41 +499,112 @@ public class ShadowRouteService {
 
     private void analyzeRouteDetailedShadows(Route route, List<ShadowArea> shadowAreas) {
         try {
-            logger.debug("=== 경로별 상세 그림자 분석 시작 ===");
+            logger.debug("=== 배치 처리 상세 그림자 분석 시작 ===");
 
             List<RoutePoint> points = route.getPoints();
             if (points.isEmpty()) return;
 
-            // 🔧 각 포인트별로 개별 그림자 검사
+            // 🚀 배치 처리로 모든 포인트를 한 번에 검사
+            Map<Integer, Boolean> detailedShadowResults = batchCheckDetailedShadows(points, shadowAreas);
+
+            // 결과 적용 (기존 그림자 정보 + 새로 발견한 그림자)
+            int newShadowCount = 0;
             for (int i = 0; i < points.size(); i++) {
                 RoutePoint point = points.get(i);
 
-                // 포인트 주변 100m 내 건물 그림자 직접 검사
-                boolean isInDetailedShadow = checkPointDetailedShadow(point, shadowAreas);
-
-                if (isInDetailedShadow && !point.isInShadow()) {
+                Boolean isDetailedShadow = detailedShadowResults.get(i);
+                if (isDetailedShadow != null && isDetailedShadow && !point.isInShadow()) {
                     point.setInShadow(true);
-                    logger.debug("포인트 {}에서 상세 분석으로 그림자 감지: ({}, {})",
+                    newShadowCount++;
+                    logger.debug("포인트 {}에서 배치 분석으로 그림자 감지: ({}, {})",
                             i, point.getLat(), point.getLng());
                 }
             }
 
             // 그림자 비율 재계산
-            int shadowCount = 0;
+            int totalShadowCount = 0;
             for (RoutePoint point : points) {
-                if (point.isInShadow()) shadowCount++;
+                if (point.isInShadow()) totalShadowCount++;
             }
 
-            int newShadowPercentage = points.size() > 0 ? (shadowCount * 100 / points.size()) : 0;
+            int newShadowPercentage = points.size() > 0 ? (totalShadowCount * 100 / points.size()) : 0;
             route.setShadowPercentage(newShadowPercentage);
 
-            logger.info("상세 분석 완료: {}% 그림자 ({}/{}개 포인트)",
-                    newShadowPercentage, shadowCount, points.size());
+            logger.info("배치 처리 상세 분석 완료: {}% 그림자 ({}/{}개 포인트) - 새로 발견: {}개",
+                    newShadowPercentage, totalShadowCount, points.size(), newShadowCount);
 
         } catch (Exception e) {
-            logger.error("상세 그림자 분석 오류: " + e.getMessage(), e);
+            logger.error("배치 처리 상세 그림자 분석 오류: " + e.getMessage(), e);
         }
     }
+
+    /**
+     *  배치 처리로 상세 그림자 검사 (기존 개별 검사를 배치로 변경)
+     */
+    private Map<Integer, Boolean> batchCheckDetailedShadows(List<RoutePoint> points, List<ShadowArea> shadowAreas) {
+        Map<Integer, Boolean> results = new HashMap<>();
+
+        try {
+            // 모든 포인트를 MULTIPOINT로 변환
+            StringBuilder pointsWkt = new StringBuilder("MULTIPOINT(");
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
+                if (i > 0) pointsWkt.append(",");
+                pointsWkt.append(String.format("(%f %f)", point.getLng(), point.getLat()));
+            }
+            pointsWkt.append(")");
+
+            // 🚀 각 그림자 영역에 대해 배치로 모든 포인트 검사
+            for (ShadowArea shadowArea : shadowAreas) {
+                String shadowGeom = shadowArea.getShadowGeometry();
+                if (shadowGeom == null || shadowGeom.isEmpty()) continue;
+
+                // 한 번의 쿼리로 이 그림자 영역과 모든 포인트의 관계 확인
+                String batchSql = """
+                WITH shadow_geom AS (
+                    SELECT ST_GeomFromGeoJSON(?) as geom
+                ),
+                route_points AS (
+                    SELECT 
+                        (ST_Dump(ST_GeomFromText(?, 4326))).geom as point_geom,
+                        generate_series(1, ST_NumGeometries(ST_GeomFromText(?, 4326))) as point_index
+                )
+                SELECT 
+                    rp.point_index - 1 as index,
+                    ST_DWithin(sg.geom, rp.point_geom, 0.0007) as is_near_shadow
+                FROM route_points rp, shadow_geom sg
+                WHERE ST_DWithin(sg.geom, rp.point_geom, 0.0007)
+                ORDER BY rp.point_index
+                """;
+
+                try {
+                    List<Map<String, Object>> batchResults = jdbcTemplate.queryForList(batchSql,
+                            shadowGeom, pointsWkt.toString(), pointsWkt.toString());
+
+                    // 이 그림자 영역에서 감지된 포인트들 기록
+                    for (Map<String, Object> row : batchResults) {
+                        int index = ((Number) row.get("index")).intValue();
+                        boolean isNearShadow = (Boolean) row.get("is_near_shadow");
+
+                        if (isNearShadow) {
+                            results.put(index, true);
+                        }
+                    }
+
+                } catch (Exception e) {
+                    logger.warn("그림자 영역 {}에 대한 배치 검사 실패: {}", shadowArea.getId(), e.getMessage());
+                }
+            }
+
+            logger.debug("배치 상세 그림자 검사 완료: {}개 포인트가 그림자로 감지", results.size());
+
+        } catch (Exception e) {
+            logger.error("배치 상세 그림자 검사 오류: " + e.getMessage(), e);
+        }
+
+        return results;
+    }
+
 
     /**
      * 개별 포인트의 상세 그림자 검사
