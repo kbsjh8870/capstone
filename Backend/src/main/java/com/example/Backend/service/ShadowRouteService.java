@@ -360,21 +360,28 @@ public class ShadowRouteService {
             List<RoutePoint> points = route.getPoints();
             int shadowCount = 0;
 
-            // 각 경로 포인트가 실제 그림자 영역에 있는지 확인
+            // 🔧 1차 검사: 기존 방식
             for (RoutePoint point : points) {
                 boolean isInShadow = checkPointInShadowRelaxed(point, mergedShadows);
                 point.setInShadow(isInShadow);
-
-                if (isInShadow) {
-                    shadowCount++;
-                }
+                if (isInShadow) shadowCount++;
             }
 
-            // 그림자 비율 계산
+            logger.debug("1차 그림자 검사 완료: {}개 포인트 감지", shadowCount);
+
+            // 🔧 2차 검사: 상세 분석으로 누락된 그림자 보완
+            analyzeRouteDetailedShadows(route, shadowAreas);
+
+            // 최종 통계
+            shadowCount = 0;
+            for (RoutePoint point : points) {
+                if (point.isInShadow()) shadowCount++;
+            }
+
             int shadowPercentage = points.size() > 0 ? (shadowCount * 100 / points.size()) : 0;
             route.setShadowPercentage(shadowPercentage);
 
-            logger.info("실제 DB 그림자 정보 적용 완료: {}% ({}/{}개 포인트)",
+            logger.info("최종 DB 그림자 정보 적용 완료: {}% ({}/{}개 포인트)",
                     shadowPercentage, shadowCount, points.size());
 
         } catch (Exception e) {
@@ -391,7 +398,7 @@ public class ShadowRouteService {
      */
     private boolean checkPointInShadowRelaxed(RoutePoint point, String mergedShadows) {
         try {
-            // 1. 정확한 포함 확인
+            // 🔧 1. 더 정밀한 포함 확인
             String containsSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
             Boolean exactContains = jdbcTemplate.queryForObject(containsSql, Boolean.class,
                     mergedShadows, point.getLng(), point.getLat());
@@ -400,15 +407,106 @@ public class ShadowRouteService {
                 return true;
             }
 
-            // 🔧 2. 정밀한 거리 기반 확인 (50m 이내로 축소)
-            String distanceSql = "SELECT ST_DWithin(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326), 0.0005)";
-            Boolean nearShadow = jdbcTemplate.queryForObject(distanceSql, Boolean.class,
+            // 🔧 2. 다중 거리 기준 확인 (10m, 25m, 50m)
+            String[] distances = {"0.0001", "0.0002", "0.0005"}; // 약 11m, 22m, 55m
+
+            for (String distance : distances) {
+                String distanceSql = "SELECT ST_DWithin(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326), ?)";
+                Boolean nearShadow = jdbcTemplate.queryForObject(distanceSql, Boolean.class,
+                        mergedShadows, point.getLng(), point.getLat(), Double.parseDouble(distance));
+
+                if (nearShadow != null && nearShadow) {
+                    return true;
+                }
+            }
+
+            // 🔧 3. 교차 확인 (포인트에서 작은 버퍼 생성해서 교차 검사)
+            String intersectsSql = """
+            SELECT ST_Intersects(
+                ST_GeomFromGeoJSON(?), 
+                ST_Buffer(ST_SetSRID(ST_MakePoint(?, ?), 4326), 0.0001)
+            )
+            """;
+            Boolean intersects = jdbcTemplate.queryForObject(intersectsSql, Boolean.class,
                     mergedShadows, point.getLng(), point.getLat());
 
-            return nearShadow != null && nearShadow;
+            return intersects != null && intersects;
 
         } catch (Exception e) {
-            logger.warn("정밀 그림자 확인 실패: " + e.getMessage());
+            logger.warn("개선된 그림자 확인 실패: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private void analyzeRouteDetailedShadows(Route route, List<ShadowArea> shadowAreas) {
+        try {
+            logger.debug("=== 경로별 상세 그림자 분석 시작 ===");
+
+            List<RoutePoint> points = route.getPoints();
+            if (points.isEmpty()) return;
+
+            // 🔧 각 포인트별로 개별 그림자 검사
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
+
+                // 포인트 주변 100m 내 건물 그림자 직접 검사
+                boolean isInDetailedShadow = checkPointDetailedShadow(point, shadowAreas);
+
+                if (isInDetailedShadow && !point.isInShadow()) {
+                    point.setInShadow(true);
+                    logger.debug("포인트 {}에서 상세 분석으로 그림자 감지: ({}, {})",
+                            i, point.getLat(), point.getLng());
+                }
+            }
+
+            // 그림자 비율 재계산
+            int shadowCount = 0;
+            for (RoutePoint point : points) {
+                if (point.isInShadow()) shadowCount++;
+            }
+
+            int newShadowPercentage = points.size() > 0 ? (shadowCount * 100 / points.size()) : 0;
+            route.setShadowPercentage(newShadowPercentage);
+
+            logger.info("상세 분석 완료: {}% 그림자 ({}/{}개 포인트)",
+                    newShadowPercentage, shadowCount, points.size());
+
+        } catch (Exception e) {
+            logger.error("상세 그림자 분석 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 개별 포인트의 상세 그림자 검사
+     */
+    private boolean checkPointDetailedShadow(RoutePoint point, List<ShadowArea> shadowAreas) {
+        try {
+            // 🔧 각 그림자 영역별로 개별 검사
+            for (ShadowArea shadowArea : shadowAreas) {
+                String shadowGeom = shadowArea.getShadowGeometry();
+                if (shadowGeom == null || shadowGeom.isEmpty()) continue;
+
+                // 더 관대한 기준으로 검사 (75m 이내)
+                String sql = """
+                SELECT ST_DWithin(
+                    ST_GeomFromGeoJSON(?), 
+                    ST_SetSRID(ST_MakePoint(?, ?), 4326), 
+                    0.0007
+                )
+                """;
+
+                Boolean isNear = jdbcTemplate.queryForObject(sql, Boolean.class,
+                        shadowGeom, point.getLng(), point.getLat());
+
+                if (isNear != null && isNear) {
+                    return true;
+                }
+            }
+
+            return false;
+
+        } catch (Exception e) {
+            logger.warn("개별 포인트 그림자 검사 실패: " + e.getMessage());
             return false;
         }
     }
@@ -460,69 +558,87 @@ public class ShadowRouteService {
             double startLat, double startLng, double endLat, double endLng, SunPosition sunPos) {
 
         try {
-            // 🔧 1. 태양 고도 조건 완화 (야간에도 그림자 계산 가능)
             if (sunPos.getAltitude() < -10) {
                 logger.debug("태양 고도가 너무 낮음 ({}도). 그림자 계산 제외", sunPos.getAltitude());
                 return new ArrayList<>();
             }
 
-            // 🔧 2. 그림자 방향 계산 (태양 반대편)
             double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
 
-            // 🔧 3. 그림자 길이 계산 (최소 10m, 최대 500m 제한)
+            // 🔧 그림자 길이 계산 - 더 현실적으로
             double shadowLength;
-            if (sunPos.getAltitude() <= 0) {
-                shadowLength = 300; // 야간/일몰 시 고정 길이
+            if (sunPos.getAltitude() <= 5) {
+                shadowLength = 1000; // 저녁 시간에는 매우 긴 그림자
             } else {
-                shadowLength = Math.min(500, Math.max(10,
-                        100 / Math.tan(Math.toRadians(sunPos.getAltitude()))));
+                // tan 값이 매우 작을 때 보정
+                double tanValue = Math.tan(Math.toRadians(sunPos.getAltitude()));
+                shadowLength = Math.min(2000, Math.max(50, 100 / tanValue));
             }
 
-            logger.debug("그림자 계산 파라미터: 태양고도={}도, 방위각={}도, 그림자방향={}도, 그림자길이={}m",
+            logger.debug("개선된 그림자 계산: 태양고도={}도, 방위각={}도, 그림자방향={}도, 그림자길이={}m",
                     sunPos.getAltitude(), sunPos.getAzimuth(), shadowDirection, shadowLength);
 
-            // 🔧 4. 개선된 PostGIS 쿼리
+            // 🔧 완전히 개선된 PostGIS 쿼리
             String sql = """
             WITH route_area AS (
                 SELECT ST_Buffer(
                     ST_MakeLine(
                         ST_SetSRID(ST_MakePoint(?, ?), 4326),
                         ST_SetSRID(ST_MakePoint(?, ?), 4326)
-                    ), 0.005
+                    ), 0.008  -- 더 넓은 버퍼 (약 900m)
                 ) as geom
             ),
-            building_shadows AS (
+            enhanced_building_shadows AS (
                 SELECT 
                     b.id,
                     b."A16" as height,
                     ST_AsGeoJSON(b.geom) as building_geom,
+                    -- 🔧 다중 그림자 영역 생성 (건물 높이에 따라)
                     ST_AsGeoJSON(
-                        ST_Union(
+                        ST_Union(ARRAY[
+                            -- 기본 건물 영역
                             b.geom,
-                            -- 🔧 개선된 그림자 계산 공식
+                            -- 50% 그림자
                             ST_Translate(
                                 b.geom,
-                                -- X 방향 이동 (경도): 그림자 길이 * cos(방향) / 경도당 미터
+                                (? * 0.5) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                                (? * 0.5) * sin(radians(?)) / 110540.0
+                            ),
+                            -- 100% 그림자  
+                            ST_Translate(
+                                b.geom,
                                 ? * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
-                                -- Y 방향 이동 (위도): 그림자 길이 * sin(방향) / 위도당 미터  
                                 ? * sin(radians(?)) / 110540.0
+                            ),
+                            -- 🆕 건물 높이 고려한 추가 그림자 (높은 건물은 더 긴 그림자)
+                            ST_Translate(
+                                b.geom,
+                                (? * (b."A16" / 50.0)) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                                (? * (b."A16" / 50.0)) * sin(radians(?)) / 110540.0
                             )
-                        )
+                        ])
                     ) as shadow_geom
                 FROM public."AL_D010_26_20250304" b, route_area r
                 WHERE ST_Intersects(b.geom, r.geom)
-                  AND b."A16" > 3  -- 🔧 최소 높이 조건 완화 (3m 이상)
-                ORDER BY b."A16" DESC  -- 🔧 높은 건물 우선
-                LIMIT 50  -- 🔧 건물 수 증가
+                  AND b."A16" > 2  -- 2m 이상 모든 건물
+                ORDER BY 
+                    -- 🔧 경로와 가까운 건물 우선, 높은 건물 우선
+                    ST_Distance(b.geom, r.geom) ASC,
+                    b."A16" DESC
+                LIMIT 100  -- 더 많은 건물 포함
             )
             SELECT id, height, building_geom, shadow_geom
-            FROM building_shadows
+            FROM enhanced_building_shadows
             """;
 
             List<Map<String, Object>> results = jdbcTemplate.queryForList(sql,
-                    startLng, startLat, endLng, endLat,  // route_area 파라미터
-                    shadowLength, shadowDirection,        // X 방향 이동
-                    shadowLength, shadowDirection);       // Y 방향 이동
+                    startLng, startLat, endLng, endLat,  // route_area
+                    shadowLength, shadowDirection,        // 50% 그림자
+                    shadowLength, shadowDirection,
+                    shadowLength, shadowDirection,        // 100% 그림자
+                    shadowLength, shadowDirection,
+                    shadowLength, shadowDirection,        // 높이 비례 그림자
+                    shadowLength, shadowDirection);
 
             List<ShadowArea> shadowAreas = new ArrayList<>();
             for (Map<String, Object> row : results) {
@@ -534,13 +650,13 @@ public class ShadowRouteService {
                 shadowAreas.add(area);
             }
 
-            logger.info("수정된 그림자 계산 완료: {}개 건물, 태양고도={}도",
-                    shadowAreas.size(), sunPos.getAltitude());
+            logger.info("개선된 그림자 계산 완료: {}개 건물, 그림자길이={}m",
+                    shadowAreas.size(), shadowLength);
 
             return shadowAreas;
 
         } catch (Exception e) {
-            logger.error("수정된 그림자 계산 오류: " + e.getMessage(), e);
+            logger.error("개선된 그림자 계산 오류: " + e.getMessage(), e);
             return new ArrayList<>();
         }
     }
