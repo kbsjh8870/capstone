@@ -307,33 +307,49 @@ public class ShadowRouteService {
         if (basePoints.size() < 5) return null;
 
         try {
-            // 경로 중간점 선택
-            int middleIdx = basePoints.size() / 2;
-            RoutePoint middlePoint = basePoints.get(middleIdx);
+            // 경로 중간점과 목적지 방향 계산
+            RoutePoint startPoint = basePoints.get(0);
+            RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
+            RoutePoint middlePoint = basePoints.get(basePoints.size() / 2);
 
-            // 태양 위치 기반 우회 방향 결정
-            double targetDirection;
+            //  목적지 방향 계산
+            double destinationDirection = calculateDirection(startPoint, endPoint);
+
+            logger.debug("경로 분석: 시작=({}, {}), 끝=({}, {}), 중간=({}, {})",
+                    startPoint.getLat(), startPoint.getLng(),
+                    endPoint.getLat(), endPoint.getLng(),
+                    middlePoint.getLat(), middlePoint.getLng());
+            logger.debug("목적지 방향: {}도", destinationDirection);
+
+            // 목적지 방향 기준 허용 우회 범위 설정 (±90도)
+            double minAllowedDirection = (destinationDirection - 90 + 360) % 360;
+            double maxAllowedDirection = (destinationDirection + 90) % 360;
+
+            logger.debug("허용 우회 범위: {}도 ~ {}도", minAllowedDirection, maxAllowedDirection);
+
+            // 태양 위치 기반 초기 방향 계산
+            double solarTargetDirection;
             if (avoidShadow) {
-                // 그림자 회피: 태양 반대 방향으로 우회 (그림자가 적은 곳으로)
-                // 건물 그림자는 태양 반대편에 생기므로, 그림자를 피하려면 태양쪽으로 가야 함
-                targetDirection = sunPos.getAzimuth();
+                // 그림자 회피: 태양 방향
+                solarTargetDirection = sunPos.getAzimuth();
             } else {
-                // 그림자 선호: 태양 반대 방향으로 우회 (그림자가 많은 곳으로)
-                // 건물 그림자가 있는 태양 반대편으로 우회
-                targetDirection = (sunPos.getAzimuth() + 180) % 360;
+                // 그림자 선호: 태양 반대 방향
+                solarTargetDirection = (sunPos.getAzimuth() + 180) % 360;
             }
 
-            // 실제 그림자 영역 분석 기반 우회 방향 조정
-            if (!shadowAreas.isEmpty()) {
-                targetDirection = adjustDirectionBasedOnShadowAreas(
-                        middlePoint, shadowAreas, sunPos, avoidShadow, targetDirection);
-            }
+            logger.debug("태양 기반 초기 방향: {}도 (avoidShadow={})", solarTargetDirection, avoidShadow);
 
-            // 태양 고도에 따른 우회 거리 조정
-            double detourMeters = calculateOptimalDetourDistance(sunPos);
+            //  최종 우회 방향 결정
+            double finalDirection = determineSmartDetourDirection(
+                    middlePoint, shadowAreas, sunPos, avoidShadow,
+                    destinationDirection, solarTargetDirection,
+                    minAllowedDirection, maxAllowedDirection);
+
+            // 태양 고도에 따른 우회 거리 조정 (더 보수적으로)
+            double detourMeters = calculateConservativeDetourDistance(sunPos, destinationDirection, finalDirection);
 
             // 지리적 좌표로 변환
-            double directionRad = Math.toRadians(targetDirection);
+            double directionRad = Math.toRadians(finalDirection);
             double latDegreeInMeters = 111000.0;
             double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
 
@@ -350,15 +366,152 @@ public class ShadowRouteService {
                 return null;
             }
 
-            logger.debug("전략적 경유지 생성: 태양방위={}도, 목표방위={}도, 우회거리={}m, avoidShadow={}",
-                    sunPos.getAzimuth(), targetDirection, detourMeters, avoidShadow);
+            logger.debug("스마트 경유지 생성: 목적지방향={}도, 최종우회방향={}도, 우회거리={}m",
+                    destinationDirection, finalDirection, detourMeters);
 
             return waypoint;
 
         } catch (Exception e) {
-            logger.error("전략적 경유지 계산 오류: " + e.getMessage(), e);
+            logger.error("스마트 경유지 계산 오류: " + e.getMessage(), e);
             return null;
         }
+    }
+
+    /**
+     *  두 지점 간의 방향 계산 (도 단위)
+     */
+    private double calculateDirection(RoutePoint from, RoutePoint to) {
+        double deltaLng = to.getLng() - from.getLng();
+        double deltaLat = to.getLat() - from.getLat();
+
+        double directionRad = Math.atan2(deltaLng, deltaLat);
+        double directionDeg = Math.toDegrees(directionRad);
+
+        // 0-360도 범위로 정규화
+        return (directionDeg + 360) % 360;
+    }
+
+    /**
+     *  목적지 고려한 우회 방향 결정
+     */
+    private double determineSmartDetourDirection(RoutePoint centerPoint, List<ShadowArea> shadowAreas,
+                                                 SunPosition sunPos, boolean avoidShadow,
+                                                 double destinationDirection, double solarDirection,
+                                                 double minAllowed, double maxAllowed) {
+        try {
+            // 목적지 방향 기준 4방향으로 분석 (±45도, ±135도)
+            double[] candidateDirections = {
+                    (destinationDirection - 45 + 360) % 360,  // 목적지 방향 기준 왼쪽 45도
+                    (destinationDirection + 45) % 360,        // 목적지 방향 기준 오른쪽 45도
+                    (destinationDirection - 135 + 360) % 360, // 목적지 방향 기준 왼쪽 135도
+                    (destinationDirection + 135) % 360        // 목적지 방향 기준 오른쪽 135도
+            };
+
+            double[] shadowDensity = new double[candidateDirections.length];
+            double checkRadius = 200.0;
+
+            // 각 방향의 그림자 밀도 계산
+            for (int i = 0; i < candidateDirections.length; i++) {
+                double direction = candidateDirections[i];
+
+                // 허용 범위 내에 있는지 확인
+                if (!isDirectionInRange(direction, minAllowed, maxAllowed)) {
+                    shadowDensity[i] = avoidShadow ? 100.0 : 0.0; // 허용 범위 밖은 불리하게
+                    continue;
+                }
+
+                double dirRad = Math.toRadians(direction);
+                double checkLat = centerPoint.getLat() +
+                        (checkRadius * Math.cos(dirRad)) / 111000.0;
+                double checkLng = centerPoint.getLng() +
+                        (checkRadius * Math.sin(dirRad)) / (111000.0 * Math.cos(Math.toRadians(centerPoint.getLat())));
+
+                shadowDensity[i] = calculateShadowDensityAtPoint(checkLat, checkLng, shadowAreas);
+
+                logger.debug("방향 {}도: 그림자밀도={}%", direction, shadowDensity[i]);
+            }
+
+            // 최적 방향 선택
+            int bestIndex = 0;
+            for (int i = 1; i < candidateDirections.length; i++) {
+                if (avoidShadow) {
+                    // 그림자 회피: 그림자 밀도가 낮고, 목적지 방향에 가까운 것 우선
+                    if (shadowDensity[i] < shadowDensity[bestIndex] ||
+                            (Math.abs(shadowDensity[i] - shadowDensity[bestIndex]) < 10 &&
+                                    isCloserToDestination(candidateDirections[i], candidateDirections[bestIndex], destinationDirection))) {
+                        bestIndex = i;
+                    }
+                } else {
+                    // 그림자 선호: 그림자 밀도가 높고, 목적지 방향에 가까운 것 우선
+                    if (shadowDensity[i] > shadowDensity[bestIndex] ||
+                            (Math.abs(shadowDensity[i] - shadowDensity[bestIndex]) < 10 &&
+                                    isCloserToDestination(candidateDirections[i], candidateDirections[bestIndex], destinationDirection))) {
+                        bestIndex = i;
+                    }
+                }
+            }
+
+            double optimalDirection = candidateDirections[bestIndex];
+
+            logger.debug("스마트 방향 선택: 목적지방향={}도, 최적방향={}도, 그림자밀도={}%",
+                    destinationDirection, optimalDirection, shadowDensity[bestIndex]);
+
+            return optimalDirection;
+
+        } catch (Exception e) {
+            logger.error("스마트 우회 방향 결정 오류: " + e.getMessage(), e);
+            // 실패 시 목적지 방향의 수직 방향으로 소폭 우회
+            return (destinationDirection + 90) % 360;
+        }
+    }
+
+    /**
+     *  방향이 허용 범위 내에 있는지 확인
+     */
+    private boolean isDirectionInRange(double direction, double minAllowed, double maxAllowed) {
+        if (minAllowed <= maxAllowed) {
+            return direction >= minAllowed && direction <= maxAllowed;
+        } else {
+            // 범위가 0도를 넘나드는 경우 (예: 315도 ~ 45도)
+            return direction >= minAllowed || direction <= maxAllowed;
+        }
+    }
+
+    /**
+     *  목적지 방향에 더 가까운 방향 판단
+     */
+    private boolean isCloserToDestination(double direction1, double direction2, double destinationDirection) {
+        double diff1 = Math.min(Math.abs(direction1 - destinationDirection),
+                360 - Math.abs(direction1 - destinationDirection));
+        double diff2 = Math.min(Math.abs(direction2 - destinationDirection),
+                360 - Math.abs(direction2 - destinationDirection));
+        return diff1 < diff2;
+    }
+
+    /**
+     *  보수적 우회 거리 계산 (목적지 방향 고려)
+     */
+    private double calculateConservativeDetourDistance(SunPosition sunPos, double destinationDirection, double detourDirection) {
+        double altitude = sunPos.getAltitude();
+
+        // 목적지 방향과 우회 방향의 차이
+        double directionDiff = Math.min(Math.abs(detourDirection - destinationDirection),
+                360 - Math.abs(detourDirection - destinationDirection));
+
+        // 기본 우회 거리
+        double baseDetour;
+        if (altitude < 15) {
+            baseDetour = 150.0; // 저녁/새벽: 보수적
+        } else if (altitude < 45) {
+            baseDetour = 100.0; // 오전/오후: 보통
+        } else {
+            baseDetour = 80.0;  // 정오: 최소
+        }
+
+        //  목적지 방향과 많이 다를수록 우회 거리 감소
+        double directionFactor = 1.0 - (directionDiff / 180.0) * 0.5; // 최대 50% 감소
+
+        return baseDetour * directionFactor;
     }
 
     /**
