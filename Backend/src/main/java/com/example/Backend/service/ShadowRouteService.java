@@ -161,14 +161,22 @@ public class ShadowRouteService {
             int middleIdx = basePoints.size() / 2;
             RoutePoint middlePoint = basePoints.get(middleIdx);
 
-            // 태양 위치 기반 우회 방향 결정
+            // 🔧 수정된 부분: 태양 위치 기반 우회 방향 결정
             double targetDirection;
             if (avoidShadow) {
-                // 그림자 회피: 태양이 있는 방향으로 우회 (햇빛이 있는 곳으로)
+                // 그림자 회피: 태양 반대 방향으로 우회 (그림자가 적은 곳으로)
+                // 건물 그림자는 태양 반대편에 생기므로, 그림자를 피하려면 태양쪽으로 가야 함
                 targetDirection = sunPos.getAzimuth();
             } else {
-                // 그림자 선호: 태양 반대 방향으로 우회 (그림자가 있는 곳으로)
+                // 그림자 선호: 태양 반대 방향으로 우회 (그림자가 많은 곳으로)
+                // 건물 그림자가 있는 태양 반대편으로 우회
                 targetDirection = (sunPos.getAzimuth() + 180) % 360;
+            }
+
+            // 🔧 추가 개선: 실제 그림자 영역 분석 기반 우회 방향 조정
+            if (!shadowAreas.isEmpty()) {
+                targetDirection = adjustDirectionBasedOnShadowAreas(
+                        middlePoint, shadowAreas, sunPos, avoidShadow, targetDirection);
             }
 
             // 태양 고도에 따른 우회 거리 조정
@@ -192,14 +200,103 @@ public class ShadowRouteService {
                 return null;
             }
 
-            logger.debug("전략적 경유지 생성: 태양방위={}도, 목표방위={}도, 우회거리={}m",
-                    sunPos.getAzimuth(), targetDirection, detourMeters);
+            logger.debug("전략적 경유지 생성: 태양방위={}도, 목표방위={}도, 우회거리={}m, avoidShadow={}",
+                    sunPos.getAzimuth(), targetDirection, detourMeters, avoidShadow);
 
             return waypoint;
 
         } catch (Exception e) {
             logger.error("전략적 경유지 계산 오류: " + e.getMessage(), e);
             return null;
+        }
+    }
+
+    /**
+     * 실제 그림자 영역을 분석하여 우회 방향 조정
+     */
+    private double adjustDirectionBasedOnShadowAreas(RoutePoint centerPoint,
+                                                     List<ShadowArea> shadowAreas,
+                                                     SunPosition sunPos,
+                                                     boolean avoidShadow,
+                                                     double initialDirection) {
+        try {
+            // 중심점 주변의 그림자 밀도를 8방향으로 분석
+            double[] directions = {0, 45, 90, 135, 180, 225, 270, 315};
+            double[] shadowDensity = new double[8];
+
+            double checkRadius = 200.0; // 200m 반경에서 체크
+
+            for (int i = 0; i < directions.length; i++) {
+                double dirRad = Math.toRadians(directions[i]);
+                double checkLat = centerPoint.getLat() +
+                        (checkRadius * Math.cos(dirRad)) / 111000.0;
+                double checkLng = centerPoint.getLng() +
+                        (checkRadius * Math.sin(dirRad)) / (111000.0 * Math.cos(Math.toRadians(centerPoint.getLat())));
+
+                // 해당 방향의 그림자 밀도 계산
+                shadowDensity[i] = calculateShadowDensityAtPoint(checkLat, checkLng, shadowAreas);
+            }
+
+            // 그림자 회피 vs 선호에 따라 최적 방향 선택
+            int bestDirectionIndex = 0;
+            for (int i = 1; i < directions.length; i++) {
+                if (avoidShadow) {
+                    // 그림자 회피: 그림자 밀도가 가장 낮은 방향
+                    if (shadowDensity[i] < shadowDensity[bestDirectionIndex]) {
+                        bestDirectionIndex = i;
+                    }
+                } else {
+                    // 그림자 선호: 그림자 밀도가 가장 높은 방향
+                    if (shadowDensity[i] > shadowDensity[bestDirectionIndex]) {
+                        bestDirectionIndex = i;
+                    }
+                }
+            }
+
+            double optimalDirection = directions[bestDirectionIndex];
+
+            logger.debug("실제 그림자 분석 결과: 초기방향={}도, 최적방향={}도, avoidShadow={}",
+                    initialDirection, optimalDirection, avoidShadow);
+
+            return optimalDirection;
+
+        } catch (Exception e) {
+            logger.error("그림자 영역 기반 방향 조정 오류: " + e.getMessage(), e);
+            return initialDirection; // 오류 시 초기 방향 반환
+        }
+    }
+
+    /**
+     * 특정 지점의 그림자 밀도 계산
+     */
+    private double calculateShadowDensityAtPoint(double lat, double lng, List<ShadowArea> shadowAreas) {
+        try {
+            // PostGIS를 사용하여 해당 지점 주변 100m 내의 그림자 영역 비율 계산
+            String sql = """
+            WITH point_buffer AS (
+                SELECT ST_Buffer(ST_SetSRID(ST_MakePoint(?, ?), 4326), 0.001) as geom
+            ),
+            shadow_union AS (
+                SELECT ST_Union(ST_GeomFromGeoJSON(?)) as shadow_geom
+            )
+            SELECT 
+                COALESCE(
+                    ST_Area(ST_Intersection(pb.geom, su.shadow_geom)) / ST_Area(pb.geom) * 100,
+                    0
+                ) as shadow_percentage
+            FROM point_buffer pb, shadow_union su
+            """;
+
+            String shadowUnion = createShadowUnion(shadowAreas);
+
+            Double shadowPercentage = jdbcTemplate.queryForObject(sql, Double.class,
+                    lng, lat, shadowUnion);
+
+            return shadowPercentage != null ? shadowPercentage : 0.0;
+
+        } catch (Exception e) {
+            logger.warn("그림자 밀도 계산 오류: " + e.getMessage());
+            return 0.0;
         }
     }
 
