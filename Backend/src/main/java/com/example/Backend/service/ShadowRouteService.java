@@ -125,9 +125,8 @@ public class ShadowRouteService {
                 if (isRouteQualityAcceptable(baseRoute, enhancedRoute)) {
                     logger.debug("개선된 경로 생성 성공: {}개 포인트", enhancedRoute.getPoints().size());
 
-                    // 🔧 경유지 근처 그림자 정보 적용 후 보정
-                    applyShadowInfoFromDB(enhancedRoute, shadowAreas);
-                    adjustWaypointShadows(enhancedRoute, strategicWaypoint, shadowAreas);
+                    // 🔧 단일 호출로 모든 그림자 정보 처리
+                    applyShadowInfoWithWaypointCorrection(enhancedRoute, shadowAreas, strategicWaypoint);
 
                     return enhancedRoute;
                 }
@@ -151,6 +150,153 @@ public class ShadowRouteService {
                 return createSimplePath(startLat, startLng, endLat, endLng);
             }
         }
+    }
+
+    /**
+     *  통합된 그림자 정보 적용 메서드 (중복 호출 방지)
+     */
+    private void applyShadowInfoWithWaypointCorrection(Route route, List<ShadowArea> shadowAreas, RoutePoint waypoint) {
+        try {
+            logger.debug("=== 통합 그림자 정보 적용 시작 ===");
+
+            if (shadowAreas.isEmpty()) {
+                for (RoutePoint point : route.getPoints()) {
+                    point.setInShadow(false);
+                }
+                route.setShadowPercentage(0);
+                logger.debug("그림자 영역이 없음. 모든 포인트를 햇빛으로 설정");
+                return;
+            }
+
+            List<RoutePoint> points = route.getPoints();
+
+            // 1차: 배치 처리로 기본 그림자 검사
+            Map<Integer, Boolean> basicShadowResults = batchCheckBasicShadows(points, shadowAreas);
+
+            // 2차: 배치 처리로 상세 분석
+            Map<Integer, Boolean> detailedShadowResults = batchCheckDetailedShadows(points, shadowAreas);
+
+            // 3차: 경유지 근처 특별 보정
+            Map<Integer, Boolean> waypointShadowResults = batchCheckWaypointShadows(points, shadowAreas, waypoint);
+
+            // 🔧 모든 결과 통합 적용
+            int shadowCount = 0;
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
+
+                boolean isInShadow = basicShadowResults.getOrDefault(i, false) ||
+                        detailedShadowResults.getOrDefault(i, false) ||
+                        waypointShadowResults.getOrDefault(i, false);
+
+                point.setInShadow(isInShadow);
+                if (isInShadow) {
+                    shadowCount++;
+                    logger.debug("최종 그림자 포인트 {}: ({}, {}) - inShadow={}",
+                            i, point.getLat(), point.getLng(), point.isInShadow());
+                }
+            }
+
+            int shadowPercentage = points.size() > 0 ? (shadowCount * 100 / points.size()) : 0;
+            route.setShadowPercentage(shadowPercentage);
+
+            logger.info("통합 그림자 정보 적용 완료: {}% ({}/{}개 포인트)",
+                    shadowPercentage, shadowCount, points.size());
+
+            // 🔧 최종 검증 로깅
+            logger.debug("=== 최종 그림자 포인트 검증 ===");
+            for (int i = 0; i < Math.min(points.size(), 20); i++) {
+                RoutePoint point = points.get(i);
+                logger.debug("포인트 {}: 위치=({}, {}), inShadow={}",
+                        i, point.getLat(), point.getLng(), point.isInShadow());
+            }
+
+        } catch (Exception e) {
+            logger.error("통합 그림자 정보 적용 오류: " + e.getMessage(), e);
+            for (RoutePoint point : route.getPoints()) {
+                point.setInShadow(false);
+            }
+            route.setShadowPercentage(0);
+        }
+    }
+
+    /**
+     * 경유지 근처 배치 그림자 검사
+     */
+    private Map<Integer, Boolean> batchCheckWaypointShadows(List<RoutePoint> points,
+                                                            List<ShadowArea> shadowAreas,
+                                                            RoutePoint waypoint) {
+        Map<Integer, Boolean> results = new HashMap<>();
+
+        try {
+            // 경유지 근처 20개 포인트 범위 찾기
+            int waypointIndex = findClosestPointIndex(points, waypoint);
+            int startIdx = Math.max(0, waypointIndex - 10);
+            int endIdx = Math.min(points.size() - 1, waypointIndex + 10);
+
+            logger.debug("경유지 근처 배치 검사: 포인트 {} ~ {} (경유지: {})", startIdx, endIdx, waypointIndex);
+
+            // 경유지 근처 포인트들만 MULTIPOINT로 변환
+            StringBuilder waypointPointsWkt = new StringBuilder("MULTIPOINT(");
+            List<Integer> waypointIndices = new ArrayList<>();
+
+            for (int i = startIdx; i <= endIdx; i++) {
+                RoutePoint point = points.get(i);
+                if (waypointIndices.size() > 0) waypointPointsWkt.append(",");
+                waypointPointsWkt.append(String.format("(%f %f)", point.getLng(), point.getLat()));
+                waypointIndices.add(i);
+            }
+            waypointPointsWkt.append(")");
+
+            // 🔧 각 그림자 영역에 대해 경유지 근처 포인트들을 관대하게 검사
+            for (ShadowArea shadowArea : shadowAreas) {
+                String shadowGeom = shadowArea.getShadowGeometry();
+                if (shadowGeom == null || shadowGeom.isEmpty()) continue;
+
+                String waypointSql = """
+                WITH shadow_geom AS (
+                    SELECT ST_GeomFromGeoJSON(?) as geom
+                ),
+                waypoint_points AS (
+                    SELECT 
+                        (ST_Dump(ST_GeomFromText(?, 4326))).geom as point_geom,
+                        generate_series(1, ST_NumGeometries(ST_GeomFromText(?, 4326))) as point_index
+                )
+                SELECT 
+                    wp.point_index as local_index,
+                    ST_DWithin(sg.geom, wp.point_geom, 0.0015) as is_near_shadow  -- 165m
+                FROM waypoint_points wp, shadow_geom sg
+                WHERE ST_DWithin(sg.geom, wp.point_geom, 0.0015)
+                ORDER BY wp.point_index
+                """;
+
+                try {
+                    List<Map<String, Object>> waypointResults = jdbcTemplate.queryForList(waypointSql,
+                            shadowGeom, waypointPointsWkt.toString(), waypointPointsWkt.toString());
+
+                    // 로컬 인덱스를 전체 경로 인덱스로 매핑
+                    for (Map<String, Object> row : waypointResults) {
+                        int localIndex = ((Number) row.get("local_index")).intValue() - 1;
+                        boolean isNearShadow = (Boolean) row.get("is_near_shadow");
+
+                        if (isNearShadow && localIndex < waypointIndices.size()) {
+                            int globalIndex = waypointIndices.get(localIndex);
+                            results.put(globalIndex, true);
+                            logger.debug("경유지 근처 그림자 감지: 포인트 {} (로컬 {})", globalIndex, localIndex);
+                        }
+                    }
+
+                } catch (Exception e) {
+                    logger.warn("경유지 그림자 영역 {}에 대한 검사 실패: {}", shadowArea.getId(), e.getMessage());
+                }
+            }
+
+            logger.debug("경유지 근처 배치 그림자 검사 완료: {}개 포인트 감지", results.size());
+
+        } catch (Exception e) {
+            logger.error("경유지 근처 배치 그림자 검사 오류: " + e.getMessage(), e);
+        }
+
+        return results;
     }
 
     /**
