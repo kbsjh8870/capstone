@@ -387,7 +387,7 @@ public class ShadowRouteService {
     }
 
     /**
-     * 경로와 그림자 교차 여부를 관대하게 확인
+     * 경로와 그림자 교차 여부 확인
      */
     private boolean checkPointInShadowRelaxed(RoutePoint point, String mergedShadows) {
         try {
@@ -400,18 +400,58 @@ public class ShadowRouteService {
                 return true;
             }
 
-            // 2. 관대한 거리 기반 확인 (100m 이내)
-            String distanceSql = "SELECT ST_DWithin(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326), 0.001)";
+            // 🔧 2. 정밀한 거리 기반 확인 (50m 이내로 축소)
+            String distanceSql = "SELECT ST_DWithin(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326), 0.0005)";
             Boolean nearShadow = jdbcTemplate.queryForObject(distanceSql, Boolean.class,
                     mergedShadows, point.getLng(), point.getLat());
 
             return nearShadow != null && nearShadow;
 
         } catch (Exception e) {
-            logger.warn("관대한 그림자 확인 실패: " + e.getMessage());
+            logger.warn("정밀 그림자 확인 실패: " + e.getMessage());
             return false;
         }
     }
+
+    /**
+     *  (디버깅용) 그림자 계산 테스트 메서드
+     */
+    public void testShadowCalculationAtPoint(double lat, double lng, LocalDateTime dateTime) {
+        try {
+            SunPosition sunPos = shadowService.calculateSunPosition(lat, lng, dateTime);
+
+            logger.info("=== 그림자 계산 테스트 ===");
+            logger.info("위치: ({}, {})", lat, lng);
+            logger.info("시간: {}", dateTime);
+            logger.info("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
+
+            // 해당 지점 주변 건물 조회
+            String buildingQuery = """
+            SELECT id, "A16" as height, ST_AsText(geom) as geom_wkt
+            FROM public."AL_D010_26_20250304" 
+            WHERE ST_DWithin(geom, ST_SetSRID(ST_MakePoint(?, ?), 4326), 0.001)
+            AND "A16" > 3
+            ORDER BY "A16" DESC
+            LIMIT 10
+            """;
+
+            List<Map<String, Object>> buildings = jdbcTemplate.queryForList(buildingQuery, lng, lat);
+            logger.info("주변 건물 {}개 발견:", buildings.size());
+
+            for (Map<String, Object> building : buildings) {
+                logger.info("  건물 ID: {}, 높이: {}m",
+                        building.get("id"), building.get("height"));
+            }
+
+            // 그림자 계산
+            List<ShadowArea> shadows = calculateBuildingShadows(lat, lng, lat, lng, sunPos);
+            logger.info("계산된 그림자 영역: {}개", shadows.size());
+
+        } catch (Exception e) {
+            logger.error("그림자 테스트 오류: " + e.getMessage(), e);
+        }
+    }
+
 
     /**
      * 건물 그림자 계산
@@ -420,15 +460,35 @@ public class ShadowRouteService {
             double startLat, double startLng, double endLat, double endLng, SunPosition sunPos) {
 
         try {
+            // 🔧 1. 태양 고도 조건 완화 (야간에도 그림자 계산 가능)
+            if (sunPos.getAltitude() < -10) {
+                logger.debug("태양 고도가 너무 낮음 ({}도). 그림자 계산 제외", sunPos.getAltitude());
+                return new ArrayList<>();
+            }
+
+            // 🔧 2. 그림자 방향 계산 (태양 반대편)
             double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
 
+            // 🔧 3. 그림자 길이 계산 (최소 10m, 최대 500m 제한)
+            double shadowLength;
+            if (sunPos.getAltitude() <= 0) {
+                shadowLength = 300; // 야간/일몰 시 고정 길이
+            } else {
+                shadowLength = Math.min(500, Math.max(10,
+                        100 / Math.tan(Math.toRadians(sunPos.getAltitude()))));
+            }
+
+            logger.debug("그림자 계산 파라미터: 태양고도={}도, 방위각={}도, 그림자방향={}도, 그림자길이={}m",
+                    sunPos.getAltitude(), sunPos.getAzimuth(), shadowDirection, shadowLength);
+
+            // 🔧 4. 개선된 PostGIS 쿼리
             String sql = """
             WITH route_area AS (
                 SELECT ST_Buffer(
                     ST_MakeLine(
                         ST_SetSRID(ST_MakePoint(?, ?), 4326),
                         ST_SetSRID(ST_MakePoint(?, ?), 4326)
-                    ), 0.003
+                    ), 0.005
                 ) as geom
             ),
             building_shadows AS (
@@ -439,28 +499,30 @@ public class ShadowRouteService {
                     ST_AsGeoJSON(
                         ST_Union(
                             b.geom,
+                            -- 🔧 개선된 그림자 계산 공식
                             ST_Translate(
                                 b.geom,
-                                (b."A16" / tan(radians(?))) * cos(radians(?)) / (111000.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
-                                (b."A16" / tan(radians(?))) * sin(radians(?)) / 111000.0
+                                -- X 방향 이동 (경도): 그림자 길이 * cos(방향) / 경도당 미터
+                                ? * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                                -- Y 방향 이동 (위도): 그림자 길이 * sin(방향) / 위도당 미터  
+                                ? * sin(radians(?)) / 110540.0
                             )
                         )
                     ) as shadow_geom
                 FROM public."AL_D010_26_20250304" b, route_area r
                 WHERE ST_Intersects(b.geom, r.geom)
-                  AND b."A16" > 5
-                  AND ? > 5
-                LIMIT 30
+                  AND b."A16" > 3  -- 🔧 최소 높이 조건 완화 (3m 이상)
+                ORDER BY b."A16" DESC  -- 🔧 높은 건물 우선
+                LIMIT 50  -- 🔧 건물 수 증가
             )
             SELECT id, height, building_geom, shadow_geom
             FROM building_shadows
             """;
 
             List<Map<String, Object>> results = jdbcTemplate.queryForList(sql,
-                    startLng, startLat, endLng, endLat,
-                    sunPos.getAltitude(), shadowDirection,
-                    sunPos.getAltitude(), shadowDirection,
-                    sunPos.getAltitude());
+                    startLng, startLat, endLng, endLat,  // route_area 파라미터
+                    shadowLength, shadowDirection,        // X 방향 이동
+                    shadowLength, shadowDirection);       // Y 방향 이동
 
             List<ShadowArea> shadowAreas = new ArrayList<>();
             for (Map<String, Object> row : results) {
@@ -472,11 +534,13 @@ public class ShadowRouteService {
                 shadowAreas.add(area);
             }
 
-            logger.debug("PostGIS 기반 그림자 계산 완료: {}개 영역", shadowAreas.size());
+            logger.info("수정된 그림자 계산 완료: {}개 건물, 태양고도={}도",
+                    shadowAreas.size(), sunPos.getAltitude());
+
             return shadowAreas;
 
         } catch (Exception e) {
-            logger.error("PostGIS 그림자 계산 오류: " + e.getMessage(), e);
+            logger.error("수정된 그림자 계산 오류: " + e.getMessage(), e);
             return new ArrayList<>();
         }
     }
