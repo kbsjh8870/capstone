@@ -716,7 +716,7 @@ public class ShadowRouteService {
         // 거리 차이가 기본 경로의 25% 이내인지 확인
         double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
 
-        if (distanceRatio > 1.25) {
+        if (distanceRatio > 1.18) {
             logger.debug("경로가 너무 멀어짐: 기본={}m, 그림자={}m ({}% 증가)",
                     (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
                     (int)((distanceRatio - 1) * 100));
