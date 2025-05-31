@@ -764,7 +764,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             int shadowSegmentCount = 0;
             int totalShadowPoints = 0;
 
-            // 🔧 연속된 그림자 포인트들을 하나의 세그먼트로 처리
+            // 연속된 그림자 포인트들을 하나의 세그먼트로 처리
             for (int i = 0; i < pointsArray.length(); i++) {
                 JSONObject point = pointsArray.getJSONObject(i);
                 double lat = point.getDouble("lat");
@@ -782,7 +782,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                         Log.d(TAG, "그림자 포인트 " + totalShadowPoints + ": (" + lat + ", " + lng + ")");
                     }
                 } else {
-                    // 🔧 그림자 구간이 끝나면 즉시 오버레이 생성 (1개 포인트라도)
+                    // 그림자 구간이 끝나면 즉시 오버레이 생성 (1개 포인트라도)
                     if (!currentShadowSegment.isEmpty()) {
                         // 단일 포인트인 경우 앞뒤 포인트 추가해서 선분으로 만들기
                         if (currentShadowSegment.size() == 1) {
@@ -806,7 +806,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 }
             }
 
-            // 🔧 마지막 그림자 구간 처리
+            // 마지막 그림자 구간 처리
             if (!currentShadowSegment.isEmpty()) {
                 if (currentShadowSegment.size() == 1) {
                     // 마지막 포인트인 경우 이전 포인트만 추가
@@ -903,14 +903,14 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             Log.d(TAG, "그림자 경로 표시: " + route.getID());
         }
 
-        // 🔧 그림자 오버레이를 최상위에 표시 - 더 강화된 스타일
+        // 그림자 오버레이를 최상위에 표시 - 더 강화된 스타일
         Log.d(TAG, "그림자 오버레이 개수: " + shadowSegments.size());
 
         for (TMapPolyLine shadowSegment : shadowSegments) {
             // 기존 것 제거하고 다시 추가 (최상위로)
             tMapView.removeTMapPolyLine(shadowSegment.getID());
 
-            // 🔧 스타일 재설정 - 더욱 강화
+            // 스타일 재설정 - 더욱 강화
             shadowSegment.setLineColor(Color.BLACK);
             shadowSegment.setLineWidth(25.0f);  // 더욱 두껍게
             shadowSegment.setLineAlpha(255);    // 완전 불투명
@@ -921,7 +921,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                     " (두께: 25px, 불투명)");
         }
 
-        // 🔧 범례 표시
+        // 범례 표시
         LinearLayout shadowLegend = findViewById(R.id.shadow_legend);
         shadowLegend.setVisibility(View.VISIBLE);
 
