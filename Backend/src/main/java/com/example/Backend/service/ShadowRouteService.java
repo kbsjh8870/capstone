@@ -46,6 +46,10 @@ public class ShadowRouteService {
         List<Route> routes = new ArrayList<>();
 
         try {
+            logger.debug("=== 그림자 경로 계산 시작 ===");
+            logger.debug("시작: ({}, {}), 끝: ({}, {})", startLat, startLng, endLat, endLng);
+            logger.debug("그림자 회피: {}, 시간: {}", avoidShadow, dateTime);
+
             // 1. 기본 경로 획득 (T맵 API)
             String tmapRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
             Route basicRoute = parseBasicRoute(tmapRouteJson);
@@ -53,20 +57,42 @@ public class ShadowRouteService {
             basicRoute.setDateTime(dateTime);
             routes.add(basicRoute);
 
+            // 시간대 확인
+            int hour = dateTime.getHour();
+            boolean isNightTime = (hour >= 21 || hour <= 5);
+            boolean isEvening = (hour >= 18 && hour <= 20);
+            logger.debug("시간대 분석: {}시 - 야간={}, 저녁={}", hour, isNightTime, isEvening);
+
             // 2. 태양 위치 계산
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
             logger.debug("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
 
-            // 3. 실제 DB 건물 데이터로 그림자 계산
-            List<ShadowArea> shadowAreas = calculateBuildingShadows(startLat, startLng, endLat, endLng, sunPos);
-            logger.debug("DB에서 가져온 건물 그림자 영역: {}개", shadowAreas.size());
+            List<ShadowArea> shadowAreas;
+            if (isNightTime) {
+                // 야간: 전체 영역을 그림자로 처리
+                shadowAreas = createNightTimeShadowAreas(startLat, startLng, endLat, endLng);
+                logger.debug("야간 시간대: 전체 그림자 영역 생성");
+            } else {
+                // 일반/저녁: 건물 기반 그림자 계산
+                shadowAreas = calculateBuildingShadows(startLat, startLng, endLat, endLng, sunPos);
+                logger.debug("건물 기반 그림자 영역: {}개", shadowAreas.size());
+            }
 
             // 4. 그림자 경로 생성 (대폭 우회 전략 적용)
-            Route shadowRoute = createEnhancedShadowRoute(startLat, startLng, endLat, endLng,
-                    shadowAreas, sunPos, avoidShadow, dateTime);
+            Route shadowRoute;
+            if (isNightTime || shadowAreas.size() >= 10) {
+                // 야간이거나 그림자가 많은 경우: 기본 경로 사용 + 그림자 정보만 적용
+                shadowRoute = parseBasicRoute(tmapRouteJson);
+                logger.debug("야간/그림자 다수: 기본 경로에 그림자 정보 적용");
+            } else {
+                // 일반 시간대: 대체 경로 생성
+                shadowRoute = createEnhancedShadowRoute(startLat, startLng, endLat, endLng,
+                        shadowAreas, sunPos, avoidShadow, dateTime);
+                logger.debug("일반 시간대: 대체 경로 생성");
+            }
 
             // 5. 실제 그림자 정보 계산 및 적용
-            applyShadowInfoFromDB(shadowRoute, shadowAreas);
+            applyShadowInfoWithTimeConsideration(shadowRoute, shadowAreas, dateTime);
 
             shadowRoute.setShadowAreas(shadowAreas);
             shadowRoute.setAvoidShadow(avoidShadow);
@@ -75,12 +101,40 @@ public class ShadowRouteService {
 
             routes.add(shadowRoute);
 
-            logger.info("실제 DB 기반 그림자 경로 생성 완료: {}% 그림자", shadowRoute.getShadowPercentage());
+            logger.info("=== 그림자 경로 계산 완료 ===");
+            logger.info("시간대: {}시 (야간={}, 저녁={})", hour, isNightTime, isEvening);
+            logger.info("태양 고도: {}도", sunPos.getAltitude());
+            logger.info("그림자 영역: {}개", shadowAreas.size());
+            logger.info("최종 그림자 비율: {}%", shadowRoute.getShadowPercentage());
 
             return routes;
 
         } catch (Exception e) {
             logger.error("그림자 경로 계산 오류: " + e.getMessage(), e);
+
+            // ⭐ 실패 시 시간대별 기본 처리
+            if (routes.size() == 1) {
+                Route fallbackRoute = routes.get(0); // 기본 경로
+                int hour = dateTime.getHour();
+
+                if (hour >= 20 || hour <= 6) {
+                    // 야간: 전체 그림자로 설정
+                    for (RoutePoint point : fallbackRoute.getPoints()) {
+                        point.setInShadow(true);
+                    }
+                    fallbackRoute.setShadowPercentage(100);
+                    logger.info("실패 시 야간 처리: 100% 그림자");
+                } else if (hour >= 18 && hour <= 19) {
+                    // 저녁: 50% 그림자로 설정
+                    List<RoutePoint> points = fallbackRoute.getPoints();
+                    for (int i = 0; i < points.size(); i += 2) {
+                        points.get(i).setInShadow(true);
+                    }
+                    fallbackRoute.setShadowPercentage(50);
+                    logger.info("실패 시 저녁 처리: 50% 그림자");
+                }
+            }
+
             return routes;
         }
     }
@@ -791,6 +845,11 @@ public class ShadowRouteService {
         Map<Integer, Boolean> results = new HashMap<>();
 
         try {
+            if (shadowAreas.isEmpty()) {
+                logger.debug("그림자 영역이 없음 - 모든 포인트를 햇빛으로 처리");
+                return results; // 빈 결과 반환 (모두 햇빛)
+            }
+
             String mergedShadows = createShadowUnion(shadowAreas);
 
             // 모든 포인트를 MULTIPOINT로 변환
@@ -816,9 +875,10 @@ public class ShadowRouteService {
                 rp.point_index - 1 as index,
                 CASE 
                     WHEN ST_Contains(sg.geom, rp.point_geom) THEN true
-                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0003) THEN true  -- 약 33m
-                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0005) THEN true  -- 약 55m  
-                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0008) THEN true  -- 약 88m (경유지용)
+                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0005) THEN true  -- 55m
+                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0010) THEN true  -- 110m
+                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0015) THEN true  -- 165m (저녁용)
+                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0020) THEN true  -- 220m (야간용)
                     ELSE false
                 END as in_shadow,
                 ST_Distance(sg.geom, rp.point_geom) as distance_to_shadow
@@ -850,6 +910,117 @@ public class ShadowRouteService {
         }
 
         return results;
+    }
+
+    private void applyEveningTimeShadows(Route route, LocalDateTime dateTime) {
+        try {
+            // 저녁 8시 이후 또는 새벽 6시 이전이면 전체를 그림자로 처리
+            int hour = dateTime.getHour();
+            boolean isEvening = (hour >= 20 || hour <= 6);
+
+            if (isEvening) {
+                logger.debug("저녁/새벽 시간대 ({}시): 전체 경로를 그림자로 설정", hour);
+
+                List<RoutePoint> points = route.getPoints();
+                for (RoutePoint point : points) {
+                    point.setInShadow(true);
+                }
+
+                route.setShadowPercentage(100); // 100% 그림자
+
+                logger.info("저녁/새벽 시간대 처리 완료: 100% 그림자 ({}개 포인트)", points.size());
+                return;
+            }
+        } catch (Exception e) {
+            logger.error("저녁 시간대 그림자 처리 오류: " + e.getMessage(), e);
+        }
+    }
+
+    private void applyShadowInfoWithTimeConsideration(Route route, List<ShadowArea> shadowAreas, LocalDateTime dateTime) {
+        try {
+            logger.debug("=== 시간 고려 그림자 정보 적용 시작 ===");
+
+            // 1. 저녁/새벽 시간대 체크
+            int hour = dateTime.getHour();
+            boolean isNightTime = (hour >= 21 || hour <= 5); // 밤 9시~새벽 5시
+            boolean isEvening = (hour >= 18 && hour <= 20);   // 저녁 6시~8시
+
+            if (isNightTime) {
+                logger.debug("야간 시간대 ({}시): 전체 경로를 그림자로 설정", hour);
+                applyEveningTimeShadows(route, dateTime);
+                return;
+            }
+
+            List<RoutePoint> points = route.getPoints();
+
+            if (shadowAreas.isEmpty()) {
+                if (isEvening) {
+                    // 저녁 시간대인데 그림자 영역이 없으면 50% 그림자로 설정
+                    logger.debug("저녁 시간대지만 그림자 영역 없음. 50% 그림자로 설정");
+                    for (int i = 0; i < points.size(); i += 2) { // 50% 포인트만 그림자
+                        points.get(i).setInShadow(true);
+                    }
+                    route.setShadowPercentage(50);
+                } else {
+                    // 일반 시간대: 모두 햇빛
+                    for (RoutePoint point : points) {
+                        point.setInShadow(false);
+                    }
+                    route.setShadowPercentage(0);
+                }
+                return;
+            }
+
+            // 2. 일반 그림자 계산 (기존 로직)
+            Map<Integer, Boolean> basicResults = batchCheckBasicShadows(points, shadowAreas);
+            Map<Integer, Boolean> detailedResults = batchCheckDetailedShadows(points, shadowAreas);
+
+            // 3. 결과 적용
+            int shadowCount = 0;
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
+
+                boolean isInShadow = basicResults.getOrDefault(i, false) ||
+                        detailedResults.getOrDefault(i, false);
+
+                // 저녁 시간대에는 더 많은 포인트를 그림자로 처리
+                if (isEvening && !isInShadow) {
+                    // 저녁 시간대에는 30% 확률로 추가 그림자 처리
+                    if (i % 3 == 0) {
+                        isInShadow = true;
+                    }
+                }
+
+                point.setInShadow(isInShadow);
+                if (isInShadow) {
+                    shadowCount++;
+                }
+            }
+
+            int shadowPercentage = points.size() > 0 ? (shadowCount * 100 / points.size()) : 0;
+            route.setShadowPercentage(shadowPercentage);
+
+            logger.info("시간 고려 그림자 정보 적용 완료: {}% ({}/{}개 포인트) - 시간대: {}시",
+                    shadowPercentage, shadowCount, points.size(), hour);
+
+        } catch (Exception e) {
+            logger.error("시간 고려 그림자 정보 적용 오류: " + e.getMessage(), e);
+            // 실패 시 시간대에 따른 기본값 설정
+            int hour = dateTime.getHour();
+            if (hour >= 20 || hour <= 6) {
+                // 야간: 전체 그림자
+                for (RoutePoint point : route.getPoints()) {
+                    point.setInShadow(true);
+                }
+                route.setShadowPercentage(100);
+            } else {
+                // 일반: 그림자 없음
+                for (RoutePoint point : route.getPoints()) {
+                    point.setInShadow(false);
+                }
+                route.setShadowPercentage(0);
+            }
+        }
     }
 
     /**
@@ -1191,34 +1362,46 @@ public class ShadowRouteService {
             double startLat, double startLng, double endLat, double endLng, SunPosition sunPos) {
 
         try {
-            if (sunPos.getAltitude() < -10) {
+            /*if (sunPos.getAltitude() < -10) {
                 logger.debug("태양 고도가 너무 낮음 ({}도). 그림자 계산 제외", sunPos.getAltitude());
+                return new ArrayList<>();
+            }*/
+
+            if (sunPos.getAltitude() < -6) { // 민간 황혼 이후 (일몰 후)
+                logger.debug("저녁/야간 시간대 (고도={}도). 전체 영역을 그림자로 처리", sunPos.getAltitude());
+                return createNightTimeShadowAreas(startLat, startLng, endLat, endLng);
+            }
+
+            if (sunPos.getAltitude() < -18) { // 천체 황혼 이후에만 제외
+                logger.debug("태양 고도가 매우 낮음 ({}도). 그림자 계산 제외", sunPos.getAltitude());
                 return new ArrayList<>();
             }
 
             double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
 
-            // 🔧 그림자 길이 계산 - 더 현실적으로
+            // 그림자 길이 계산
             double shadowLength;
-            if (sunPos.getAltitude() <= 5) {
-                shadowLength = 1000; // 저녁 시간에는 매우 긴 그림자
+            if (sunPos.getAltitude() <= 0) {
+                // 일몰 후: 매우 넓은 그림자 영역
+                shadowLength = 5000; // 5km
+                logger.debug("일몰 후 처리: 그림자 길이={}m", shadowLength);
+            } else if (sunPos.getAltitude() <= 5) {
+                shadowLength = 2000; // 저녁 시간: 매우 긴 그림자
             } else {
-                // tan 값이 매우 작을 때 보정
                 double tanValue = Math.tan(Math.toRadians(sunPos.getAltitude()));
-                shadowLength = Math.min(2000, Math.max(50, 100 / tanValue));
+                shadowLength = Math.min(3000, Math.max(100, 200 / tanValue)); // 더 큰 범위
             }
 
             logger.debug("개선된 그림자 계산: 태양고도={}도, 방위각={}도, 그림자방향={}도, 그림자길이={}m",
                     sunPos.getAltitude(), sunPos.getAzimuth(), shadowDirection, shadowLength);
 
-            // 🔧 완전히 개선된 PostGIS 쿼리
             String sql = """
             WITH route_area AS (
                 SELECT ST_Buffer(
                     ST_MakeLine(
                         ST_SetSRID(ST_MakePoint(?, ?), 4326),
                         ST_SetSRID(ST_MakePoint(?, ?), 4326)
-                    ), 0.008  -- 더 넓은 버퍼 (약 900m)
+                    ), 0.012  -- 더 넓은 버퍼 (약 1.2km)
                 ) as geom
             ),
             enhanced_building_shadows AS (
@@ -1243,22 +1426,22 @@ public class ShadowRouteService {
                                 ? * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
                                 ? * sin(radians(?)) / 110540.0
                             ),
-                            -- 🆕 건물 높이 고려한 추가 그림자 (높은 건물은 더 긴 그림자)
-                            ST_Translate(
+                            -- 건물 높이 고려한 추가 그림자 (높은 건물은 더 긴 그림자)
+                              ST_Translate(
                                 b.geom,
-                                (? * (b."A16" / 50.0)) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
-                                (? * (b."A16" / 50.0)) * sin(radians(?)) / 110540.0
+                                (? * 1.5) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                                (? * 1.5) * sin(radians(?)) / 110540.0
                             )
                         ])
                     ) as shadow_geom
                 FROM public."AL_D010_26_20250304" b, route_area r
                 WHERE ST_Intersects(b.geom, r.geom)
-                  AND b."A16" > 2  -- 2m 이상 모든 건물
+                  AND b."A16" > 1  -- 1m 이상 모든 건물
                 ORDER BY 
                     -- 🔧 경로와 가까운 건물 우선, 높은 건물 우선
                     ST_Distance(b.geom, r.geom) ASC,
                     b."A16" DESC
-                LIMIT 100  -- 더 많은 건물 포함
+                LIMIT 200  -- 더 많은 건물 포함
             )
             SELECT id, height, building_geom, shadow_geom
             FROM enhanced_building_shadows
@@ -1290,6 +1473,53 @@ public class ShadowRouteService {
 
         } catch (Exception e) {
             logger.error("개선된 그림자 계산 오류: " + e.getMessage(), e);
+            return new ArrayList<>();
+        }
+    }
+
+    // 저녁/야간 시간대 전체 그림자 처리
+    private List<ShadowArea> createNightTimeShadowAreas(
+            double startLat, double startLng, double endLat, double endLng) {
+
+        try {
+            logger.debug("야간 시간대: 전체 경로 영역을 그림자로 생성");
+
+            // 경로 전체를 하나의 큰 그림자 영역으로 생성
+            String sql = """
+            WITH route_area AS (
+                SELECT ST_Buffer(
+                    ST_MakeLine(
+                        ST_SetSRID(ST_MakePoint(?, ?), 4326),
+                        ST_SetSRID(ST_MakePoint(?, ?), 4326)
+                    ), 0.02  -- 약 2km 버퍼 (매우 넓은 그림자)
+                ) as geom
+            )
+            SELECT 
+                -1 as id,
+                0 as height,
+                ST_AsGeoJSON(geom) as building_geom,
+                ST_AsGeoJSON(geom) as shadow_geom
+            FROM route_area
+            """;
+
+            List<Map<String, Object>> results = jdbcTemplate.queryForList(sql,
+                    startLng, startLat, endLng, endLat);
+
+            List<ShadowArea> shadowAreas = new ArrayList<>();
+            for (Map<String, Object> row : results) {
+                ShadowArea area = new ShadowArea();
+                area.setId(((Number) row.get("id")).longValue());
+                area.setHeight(((Number) row.get("height")).doubleValue());
+                area.setBuildingGeometry((String) row.get("building_geom"));
+                area.setShadowGeometry((String) row.get("shadow_geom"));
+                shadowAreas.add(area);
+            }
+
+            logger.info("야간 그림자 영역 생성 완료: {}개 영역", shadowAreas.size());
+            return shadowAreas;
+
+        } catch (Exception e) {
+            logger.error("야간 그림자 영역 생성 오류: " + e.getMessage(), e);
             return new ArrayList<>();
         }
     }
