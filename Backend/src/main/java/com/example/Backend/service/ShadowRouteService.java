@@ -314,26 +314,21 @@ public class ShadowRouteService {
             // 목적지 방향 계산
             double destinationDirection = calculateDirection(startPoint, endPoint);
 
-            // avoidShadow 여부에 따라 명확히 다른 전략 적용
-            double targetDirection;
             double detourMeters;
-
             if (avoidShadow) {
-                // 그림자 회피: 태양 방향으로 우회
-                targetDirection = determineAvoidShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
-                detourMeters = 200.0; // 더 큰 우회
-                logger.debug("그림자 회피 모드: 태양방향 기준 우회={}도", targetDirection);
+                detourMeters = 50.0; // 50m로 줄임
             } else {
-                // 그림자 선호: 태양 반대 방향으로 우회
-                targetDirection = determineFollowShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
-                detourMeters = 250.0; // 더욱 큰 우회로 그림자 찾기
-                logger.debug("그림자 선호 모드: 그림자 밀집 지역 우회={}도", targetDirection);
+                detourMeters = 80.0; // 80m로 줄임
             }
+
+            double targetDirection = calculateConservativeDetourDirection(
+                    destinationDirection, sunPos, avoidShadow);
+
 
             // 지리적 좌표로 변환
             double directionRad = Math.toRadians(targetDirection);
-            double latDegreeInMeters = 111000.0;
-            double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
+            double latDegreeInMeters = 111320.0;
+            double lngDegreeInMeters = 111320.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
 
             double latOffset = detourMeters * Math.cos(directionRad) / latDegreeInMeters;
             double lngOffset = detourMeters * Math.sin(directionRad) / lngDegreeInMeters;
@@ -348,14 +343,38 @@ public class ShadowRouteService {
                 return null;
             }
 
-            logger.debug("차별화된 경유지 생성: avoidShadow={}, 방향={}도, 거리={}m",
+            logger.debug("보수적 경유지 생성: avoidShadow={}, 방향={}도, 거리={}m",
                     avoidShadow, targetDirection, detourMeters);
 
             return waypoint;
 
         } catch (Exception e) {
-            logger.error("차별화된 경유지 계산 오류: " + e.getMessage(), e);
+            logger.error("보수적 경유지 계산 오류: " + e.getMessage(), e);
             return null;
+        }
+    }
+
+    private double calculateConservativeDetourDirection(double destinationDirection,
+                                                        SunPosition sunPos, boolean avoidShadow) {
+        double sunDirection = sunPos.getAzimuth();
+
+        if (avoidShadow) {
+            // 그림자 회피: 목적지 방향에서 태양 쪽으로 약간만 우회
+            double sunOffset = (sunDirection - destinationDirection + 360) % 360;
+            if (sunOffset > 180) sunOffset -= 360;
+
+            // 목적지 방향에서 최대 ±30도만 우회
+            double limitedOffset = Math.max(-30, Math.min(30, sunOffset * 0.3));
+            return (destinationDirection + limitedOffset + 360) % 360;
+        } else {
+            // 그림자 선호: 목적지 방향에서 그림자 쪽으로 약간만 우회
+            double shadowDirection = (sunDirection + 180) % 360;
+            double shadowOffset = (shadowDirection - destinationDirection + 360) % 360;
+            if (shadowOffset > 180) shadowOffset -= 360;
+
+            // 목적지 방향에서 최대 ±30도만 우회
+            double limitedOffset = Math.max(-30, Math.min(30, shadowOffset * 0.3));
+            return (destinationDirection + limitedOffset + 360) % 360;
         }
     }
 
@@ -472,10 +491,14 @@ public class ShadowRouteService {
         double deltaLng = to.getLng() - from.getLng();
         double deltaLat = to.getLat() - from.getLat();
 
-        double directionRad = Math.atan2(deltaLng, deltaLat);
-        double directionDeg = Math.toDegrees(directionRad);
+        double directionRad = Math.atan2(
+                Math.sin(Math.toRadians(deltaLng)) * Math.cos(Math.toRadians(to.getLat())),
+                Math.cos(Math.toRadians(from.getLat())) * Math.sin(Math.toRadians(to.getLat())) -
+                        Math.sin(Math.toRadians(from.getLat())) * Math.cos(Math.toRadians(to.getLat())) *
+                                Math.cos(Math.toRadians(deltaLng))
+        );
 
-        // 0-360도 범위로 정규화
+        double directionDeg = Math.toDegrees(directionRad);
         return (directionDeg + 360) % 360;
     }
 
@@ -713,24 +736,49 @@ public class ShadowRouteService {
      * 경로 품질 검증
      */
     private boolean isRouteQualityAcceptable(Route baseRoute, Route shadowRoute) {
-        // 거리 차이가 기본 경로의 25% 이내인지 확인
+        // 거리 차이가 기본 경로의 15% 이내인지 확인
         double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
 
-        if (distanceRatio > 1.18) {
+        if (distanceRatio > 1.15) {
             logger.debug("경로가 너무 멀어짐: 기본={}m, 그림자={}m ({}% 증가)",
                     (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
                     (int)((distanceRatio - 1) * 100));
             return false;
         }
 
-        // 포인트 수가 합리적인지 확인 (조건 완화)
-        if (shadowRoute.getPoints().size() < baseRoute.getPoints().size() * 0.3) {
+        // 포인트 수가 합리적인지 확인
+        if (shadowRoute.getPoints().size() < baseRoute.getPoints().size() * 0.5) {
             logger.debug("경로 포인트가 너무 적음");
+            return false;
+        }
+
+        if (!isRouteStraightEnough(shadowRoute)) {
+            logger.debug("경로가 너무 구불구불함");
             return false;
         }
 
         logger.debug("경로 품질 검증 통과: 거리 차이 {}%", (int)((distanceRatio - 1) * 100));
         return true;
+    }
+
+    private boolean isRouteStraightEnough(Route route) {
+        List<RoutePoint> points = route.getPoints();
+        if (points.size() < 3) return true;
+
+        RoutePoint start = points.get(0);
+        RoutePoint end = points.get(points.size() - 1);
+
+        // 직선 거리 계산
+        double straightDistance = calculateDistance(
+                start.getLat(), start.getLng(),
+                end.getLat(), end.getLng()
+        );
+
+        // 실제 경로 거리와 직선 거리의 비율
+        double detourRatio = route.getDistance() / straightDistance;
+
+        // 우회 비율이 1.3배를 넘으면 너무 구불구불한 것으로 판단
+        return detourRatio <= 1.3;
     }
 
     /**
