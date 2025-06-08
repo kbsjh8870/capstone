@@ -314,37 +314,26 @@ public class ShadowRouteService {
             // 목적지 방향 계산
             double destinationDirection = calculateDirection(startPoint, endPoint);
 
-            // 🔧 경로 상 그림자 밀도 분석 추가
-            double routeShadowDensity = analyzeRouteShadowDensity(basePoints, shadowAreas);
-
-            // 🔧 그림자 밀도에 따른 적응적 우회 거리
-            double detourMeters;
-            if (routeShadowDensity > 40) {
-                // 그림자가 많은 경우
-                detourMeters = avoidShadow ? 150.0 : 120.0;
-            } else if (routeShadowDensity > 20) {
-                // 중간 정도
-                detourMeters = avoidShadow ? 120.0 : 100.0;
-            } else {
-                // 그림자가 적은 경우
-                detourMeters = avoidShadow ? 100.0 : 140.0; // 그림자 선호시 더 크게 우회해서 찾기
-            }
-
             // avoidShadow 여부에 따라 명확히 다른 전략 적용
             double targetDirection;
+            double detourMeters;
 
             if (avoidShadow) {
-                // 그림자 회피: 실제 그림자 영역을 피하는 방향으로
-                targetDirection = findShadowAvoidDirection(middlePoint, destinationDirection, shadowAreas, sunPos);
+                // 그림자 회피: 태양 방향으로 우회
+                targetDirection = determineAvoidShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
+                detourMeters = 200.0; // 더 큰 우회
+                logger.debug("그림자 회피 모드: 태양방향 기준 우회={}도", targetDirection);
             } else {
-                // 그림자 선호: 실제 그림자 영역을 찾아가는 방향으로
-                targetDirection = findShadowSeekDirection(middlePoint, destinationDirection, shadowAreas, sunPos);
+                // 그림자 선호: 태양 반대 방향으로 우회
+                targetDirection = determineFollowShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
+                detourMeters = 250.0; // 더욱 큰 우회로 그림자 찾기
+                logger.debug("그림자 선호 모드: 그림자 밀집 지역 우회={}도", targetDirection);
             }
 
             // 지리적 좌표로 변환
             double directionRad = Math.toRadians(targetDirection);
-            double latDegreeInMeters = 111320.0;
-            double lngDegreeInMeters = 111320.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
+            double latDegreeInMeters = 111000.0;
+            double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
 
             double latOffset = detourMeters * Math.cos(directionRad) / latDegreeInMeters;
             double lngOffset = detourMeters * Math.sin(directionRad) / lngDegreeInMeters;
@@ -359,38 +348,14 @@ public class ShadowRouteService {
                 return null;
             }
 
-            logger.debug("개선된 경유지 생성: avoidShadow={}, 방향={}도, 거리={}m, 그림자밀도={}%",
-                    avoidShadow, targetDirection, detourMeters, routeShadowDensity);
+            logger.debug("차별화된 경유지 생성: avoidShadow={}, 방향={}도, 거리={}m",
+                    avoidShadow, targetDirection, detourMeters);
 
             return waypoint;
 
         } catch (Exception e) {
-            logger.error("개선된 경유지 계산 오류: " + e.getMessage(), e);
+            logger.error("차별화된 경유지 계산 오류: " + e.getMessage(), e);
             return null;
-        }
-    }
-
-    private double calculateConservativeDetourDirection(double destinationDirection,
-                                                        SunPosition sunPos, boolean avoidShadow) {
-        double sunDirection = sunPos.getAzimuth();
-
-        if (avoidShadow) {
-            // 그림자 회피: 목적지 방향에서 태양 쪽으로 약간만 우회
-            double sunOffset = (sunDirection - destinationDirection + 360) % 360;
-            if (sunOffset > 180) sunOffset -= 360;
-
-            // 목적지 방향에서 최대 ±30도만 우회
-            double limitedOffset = Math.max(-30, Math.min(30, sunOffset * 0.3));
-            return (destinationDirection + limitedOffset + 360) % 360;
-        } else {
-            // 그림자 선호: 목적지 방향에서 그림자 쪽으로 약간만 우회
-            double shadowDirection = (sunDirection + 180) % 360;
-            double shadowOffset = (shadowDirection - destinationDirection + 360) % 360;
-            if (shadowOffset > 180) shadowOffset -= 360;
-
-            // 목적지 방향에서 최대 ±30도만 우회
-            double limitedOffset = Math.max(-30, Math.min(30, shadowOffset * 0.3));
-            return (destinationDirection + limitedOffset + 360) % 360;
         }
     }
 
@@ -510,9 +475,10 @@ public class ShadowRouteService {
         double directionRad = Math.atan2(deltaLng, deltaLat);
         double directionDeg = Math.toDegrees(directionRad);
 
-        // 북쪽 기준 시계방향으로 정규화 (0-360도)
+        // 0-360도 범위로 정규화
         return (directionDeg + 360) % 360;
     }
+
     /**
      *  목적지 고려한 우회 방향 결정
      */
@@ -747,17 +713,17 @@ public class ShadowRouteService {
      * 경로 품질 검증
      */
     private boolean isRouteQualityAcceptable(Route baseRoute, Route shadowRoute) {
+        // 거리 차이가 기본 경로의 25% 이내인지 확인
         double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
 
-        // 🔧 거리 차이를 더 관대하게 허용 (그림자 효과를 위해)
-        if (distanceRatio > 1.20) { // 20% 증가까지 허용
+        if (distanceRatio > 1.18) {
             logger.debug("경로가 너무 멀어짐: 기본={}m, 그림자={}m ({}% 증가)",
                     (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
                     (int)((distanceRatio - 1) * 100));
             return false;
         }
 
-        // 포인트 수 검증 조건 완화
+        // 포인트 수가 합리적인지 확인 (조건 완화)
         if (shadowRoute.getPoints().size() < baseRoute.getPoints().size() * 0.3) {
             logger.debug("경로 포인트가 너무 적음");
             return false;
@@ -1461,358 +1427,5 @@ public class ShadowRouteService {
         route.setDuration((int) (distance / 67));
 
         return route;
-    }
-
-
-
-
-
-    private RoutePoint createIntelligentWaypoint(List<RoutePoint> basePoints, SunPosition sunPos,
-                                                 boolean avoidShadow, List<ShadowArea> shadowAreas) {
-        if (basePoints.size() < 5) return null;
-
-        try {
-            RoutePoint startPoint = basePoints.get(0);
-            RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
-            RoutePoint middlePoint = basePoints.get(basePoints.size() / 2);
-
-            // 🔧 경로 상 그림자 밀도 분석
-            double routeShadowDensity = analyzeRouteShadowDensity(basePoints, shadowAreas);
-
-            // 🔧 그림자 밀도에 따른 적응적 우회 거리 계산
-            double adaptiveDetourDistance = calculateAdaptiveDetourDistance(
-                    routeShadowDensity, avoidShadow, sunPos.getAltitude());
-
-            logger.debug("경로 그림자 밀도: {}%, 적응적 우회 거리: {}m",
-                    routeShadowDensity, adaptiveDetourDistance);
-
-            // 목적지 방향 계산
-            double destinationDirection = calculateDirection(startPoint, endPoint);
-
-            // 🔧 실제 그림자 영역을 고려한 최적 우회 방향 계산
-            double optimalDirection = findOptimalDetourDirection(
-                    middlePoint, destinationDirection, shadowAreas, avoidShadow, sunPos);
-
-            // 좌표 변환
-            double directionRad = Math.toRadians(optimalDirection);
-            double latDegreeInMeters = 111320.0;
-            double lngDegreeInMeters = 111320.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
-
-            double latOffset = adaptiveDetourDistance * Math.cos(directionRad) / latDegreeInMeters;
-            double lngOffset = adaptiveDetourDistance * Math.sin(directionRad) / lngDegreeInMeters;
-
-            RoutePoint waypoint = new RoutePoint();
-            waypoint.setLat(middlePoint.getLat() + latOffset);
-            waypoint.setLng(middlePoint.getLng() + lngOffset);
-
-            // 생성된 경유지의 효과성 검증
-            if (!isWaypointEffective(middlePoint, waypoint, shadowAreas, avoidShadow)) {
-                logger.debug("경유지 효과성 부족, 다중 경유지 전략 시도");
-                return createMultipleWaypoints(basePoints, shadowAreas, avoidShadow, sunPos);
-            }
-
-            logger.debug("적응적 경유지 생성 성공: 밀도={}%, 거리={}m, 방향={}도",
-                    routeShadowDensity, adaptiveDetourDistance, optimalDirection);
-
-            return waypoint;
-
-        } catch (Exception e) {
-            logger.error("적응적 경유지 계산 오류: " + e.getMessage(), e);
-            return null;
-        }
-    }
-
-    private double analyzeRouteShadowDensity(List<RoutePoint> points, List<ShadowArea> shadowAreas) {
-        if (shadowAreas.isEmpty() || points.size() < 2) return 0.0;
-
-        int samplePoints = Math.min(10, points.size()); // 10개 샘플로 분석
-        int shadowCount = 0;
-
-        for (int i = 0; i < samplePoints; i++) {
-            int index = i * (points.size() - 1) / Math.max(1, samplePoints - 1);
-            RoutePoint point = points.get(index);
-
-            double shadowDensity = calculateShadowDensityAtPoint(
-                    point.getLat(), point.getLng(), shadowAreas);
-
-            if (shadowDensity > 15.0) { // 15% 이상이면 그림자 지역
-                shadowCount++;
-            }
-        }
-
-        return (shadowCount * 100.0) / samplePoints;
-    }
-
-
-    private double findShadowAvoidDirection(RoutePoint centerPoint, double destinationDirection,
-                                            List<ShadowArea> shadowAreas, SunPosition sunPos) {
-        // 4방향 후보 (목적지 방향 기준 ±45도, ±90도)
-        double[] candidates = {
-                (destinationDirection + 45) % 360,
-                (destinationDirection - 45 + 360) % 360,
-                (destinationDirection + 90) % 360,
-                (destinationDirection - 90 + 360) % 360
-        };
-
-        double bestDirection = sunPos.getAzimuth(); // 기본값: 태양 방향
-        double lowestShadowDensity = 100.0;
-
-        for (double direction : candidates) {
-            // 각 방향으로 100m 지점의 그림자 밀도 확인
-            double checkDistance = 100.0;
-            double dirRad = Math.toRadians(direction);
-
-            double checkLat = centerPoint.getLat() +
-                    (checkDistance * Math.cos(dirRad)) / 111320.0;
-            double checkLng = centerPoint.getLng() +
-                    (checkDistance * Math.sin(dirRad)) /
-                            (111320.0 * Math.cos(Math.toRadians(centerPoint.getLat())));
-
-            double shadowDensity = calculateShadowDensityAtPoint(checkLat, checkLng, shadowAreas);
-
-            if (shadowDensity < lowestShadowDensity) {
-                lowestShadowDensity = shadowDensity;
-                bestDirection = direction;
-            }
-        }
-
-        logger.debug("그림자 회피 방향 선택: {}도 (그림자밀도={}%)", bestDirection, lowestShadowDensity);
-        return bestDirection;
-    }
-
-    private double findShadowSeekDirection(RoutePoint centerPoint, double destinationDirection,
-                                           List<ShadowArea> shadowAreas, SunPosition sunPos) {
-        // 4방향 후보 (목적지 방향 기준 ±45도, ±90도)
-        double[] candidates = {
-                (destinationDirection + 45) % 360,
-                (destinationDirection - 45 + 360) % 360,
-                (destinationDirection + 90) % 360,
-                (destinationDirection - 90 + 360) % 360
-        };
-
-        double bestDirection = (sunPos.getAzimuth() + 180) % 360; // 기본값: 그림자 방향
-        double highestShadowDensity = 0.0;
-
-        for (double direction : candidates) {
-            // 각 방향으로 100m 지점의 그림자 밀도 확인
-            double checkDistance = 100.0;
-            double dirRad = Math.toRadians(direction);
-
-            double checkLat = centerPoint.getLat() +
-                    (checkDistance * Math.cos(dirRad)) / 111320.0;
-            double checkLng = centerPoint.getLng() +
-                    (checkDistance * Math.sin(dirRad)) /
-                            (111320.0 * Math.cos(Math.toRadians(centerPoint.getLat())));
-
-            double shadowDensity = calculateShadowDensityAtPoint(checkLat, checkLng, shadowAreas);
-
-            if (shadowDensity > highestShadowDensity) {
-                highestShadowDensity = shadowDensity;
-                bestDirection = direction;
-            }
-        }
-
-        logger.debug("그림자 추구 방향 선택: {}도 (그림자밀도={}%)", bestDirection, highestShadowDensity);
-        return bestDirection;
-    }
-
-    private double calculateAdaptiveDetourDistance(double routeShadowDensity,
-                                                   boolean avoidShadow, double sunAltitude) {
-        // 기본 우회 거리
-        double baseDetour = 120.0; // 중간 거리로 시작
-
-        // 그림자 밀도에 따른 조정
-        double densityFactor;
-        if (avoidShadow) {
-            // 그림자 회피: 그림자가 많을수록 더 크게 우회
-            densityFactor = 1.0 + (routeShadowDensity / 100.0) * 0.8; // 최대 80% 증가
-        } else {
-            // 그림자 선호: 그림자가 적을수록 더 크게 우회해서 찾기
-            densityFactor = 1.0 + ((100.0 - routeShadowDensity) / 100.0) * 0.6; // 최대 60% 증가
-        }
-
-        // 태양 고도에 따른 조정 (낮을수록 그림자가 길어서 더 우회 필요)
-        double altitudeFactor = sunAltitude < 30 ? 1.3 : (sunAltitude < 60 ? 1.1 : 1.0);
-
-        double adaptiveDistance = baseDetour * densityFactor * altitudeFactor;
-
-        // 최소/최대 거리 제한
-        return Math.max(80.0, Math.min(200.0, adaptiveDistance));
-    }
-
-    // 🔧 실제 그림자 영역을 고려한 최적 우회 방향
-    private double findOptimalDetourDirection(RoutePoint centerPoint, double destinationDirection,
-                                              List<ShadowArea> shadowAreas, boolean avoidShadow,
-                                              SunPosition sunPos) {
-        // 8방향으로 그림자 밀도 분석 (45도 간격)
-        double[] directions = new double[8];
-        double[] shadowDensities = new double[8];
-
-        for (int i = 0; i < 8; i++) {
-            directions[i] = i * 45.0;
-
-            // 각 방향으로 150m 지점의 그림자 밀도 측정
-            double checkDistance = 150.0;
-            double dirRad = Math.toRadians(directions[i]);
-
-            double checkLat = centerPoint.getLat() +
-                    (checkDistance * Math.cos(dirRad)) / 111320.0;
-            double checkLng = centerPoint.getLng() +
-                    (checkDistance * Math.sin(dirRad)) /
-                            (111320.0 * Math.cos(Math.toRadians(centerPoint.getLat())));
-
-            shadowDensities[i] = calculateShadowDensityAtPoint(checkLat, checkLng, shadowAreas);
-        }
-
-        // 목적지 방향 ±90도 범위 내에서만 고려 (너무 멀리 돌아가지 않도록)
-        double minAllowed = (destinationDirection - 90 + 360) % 360;
-        double maxAllowed = (destinationDirection + 90) % 360;
-
-        int bestIndex = -1;
-        double bestScore = -1;
-
-        for (int i = 0; i < 8; i++) {
-            if (!isDirectionInAllowedRange(directions[i], minAllowed, maxAllowed)) {
-                continue; // 허용 범위 밖은 제외
-            }
-
-            // 목적지 방향과의 차이 (작을수록 좋음)
-            double directionDiff = Math.min(
-                    Math.abs(directions[i] - destinationDirection),
-                    360 - Math.abs(directions[i] - destinationDirection)
-            );
-
-            double score;
-            if (avoidShadow) {
-                // 그림자 회피: 그림자 밀도가 낮고 목적지 방향에 가까울수록 좋음
-                score = (100 - shadowDensities[i]) * 0.7 + (90 - directionDiff) * 0.3;
-            } else {
-                // 그림자 선호: 그림자 밀도가 높고 목적지 방향에 가까울수록 좋음
-                score = shadowDensities[i] * 0.7 + (90 - directionDiff) * 0.3;
-            }
-
-            if (score > bestScore) {
-                bestScore = score;
-                bestIndex = i;
-            }
-        }
-
-        if (bestIndex == -1) {
-            // 적절한 방향을 찾지 못한 경우 태양 기반 방향 사용
-            return avoidShadow ? sunPos.getAzimuth() : (sunPos.getAzimuth() + 180) % 360;
-        }
-
-        logger.debug("최적 우회 방향 선택: {}도 (그림자밀도={}%, 점수={})",
-                directions[bestIndex], shadowDensities[bestIndex], bestScore);
-
-        return directions[bestIndex];
-    }
-    private boolean isDirectionInAllowedRange(double direction, double minAllowed, double maxAllowed) {
-        if (minAllowed <= maxAllowed) {
-            return direction >= minAllowed && direction <= maxAllowed;
-        } else {
-            // 범위가 0도를 넘나드는 경우 (예: 315도 ~ 45도)
-            return direction >= minAllowed || direction <= maxAllowed;
-        }
-    }
-
-    private boolean isWaypointEffective(RoutePoint original, RoutePoint waypoint,
-                                        List<ShadowArea> shadowAreas, boolean avoidShadow) {
-        double originalShadowDensity = calculateShadowDensityAtPoint(
-                original.getLat(), original.getLng(), shadowAreas);
-        double waypointShadowDensity = calculateShadowDensityAtPoint(
-                waypoint.getLat(), waypoint.getLng(), shadowAreas);
-
-        double improvement = avoidShadow ?
-                (originalShadowDensity - waypointShadowDensity) :  // 그림자 감소량
-                (waypointShadowDensity - originalShadowDensity);   // 그림자 증가량
-
-        // 최소 10% 이상의 개선이 있어야 효과적
-        return improvement >= 10.0;
-    }
-
-    private RoutePoint createMultipleWaypoints(List<RoutePoint> basePoints,
-                                               List<ShadowArea> shadowAreas,
-                                               boolean avoidShadow, SunPosition sunPos) {
-        try {
-            // 경로를 3등분해서 2개의 경유지 후보 생성
-            int firstWaypointIndex = basePoints.size() / 3;
-            int secondWaypointIndex = basePoints.size() * 2 / 3;
-
-            RoutePoint firstCandidate = generateSmartWaypoint(
-                    basePoints.get(firstWaypointIndex), shadowAreas, avoidShadow, 100.0);
-            RoutePoint secondCandidate = generateSmartWaypoint(
-                    basePoints.get(secondWaypointIndex), shadowAreas, avoidShadow, 100.0);
-
-            // 두 후보 중 더 효과적인 것 선택
-            if (firstCandidate != null && secondCandidate != null) {
-                double firstEffectiveness = calculateWaypointEffectiveness(
-                        firstCandidate, shadowAreas, avoidShadow);
-                double secondEffectiveness = calculateWaypointEffectiveness(
-                        secondCandidate, shadowAreas, avoidShadow);
-
-                return firstEffectiveness > secondEffectiveness ? firstCandidate : secondCandidate;
-            }
-
-            return firstCandidate != null ? firstCandidate : secondCandidate;
-
-        } catch (Exception e) {
-            logger.error("다중 경유지 생성 오류: " + e.getMessage(), e);
-            return null;
-        }
-    }
-
-    private RoutePoint generateSmartWaypoint(RoutePoint basePoint, List<ShadowArea> shadowAreas,
-                                             boolean avoidShadow, double radius) {
-        double bestLat = basePoint.getLat();
-        double bestLng = basePoint.getLng();
-        double bestScore = avoidShadow ? 100.0 : 0.0; // 초기값
-
-        // 16방향으로 후보 위치 검색
-        for (int i = 0; i < 16; i++) {
-            double angle = i * 22.5; // 22.5도 간격
-            double angleRad = Math.toRadians(angle);
-
-            double candidateLat = basePoint.getLat() +
-                    (radius * Math.cos(angleRad)) / 111320.0;
-            double candidateLng = basePoint.getLng() +
-                    (radius * Math.sin(angleRad)) /
-                            (111320.0 * Math.cos(Math.toRadians(basePoint.getLat())));
-
-            double shadowDensity = calculateShadowDensityAtPoint(candidateLat, candidateLng, shadowAreas);
-
-            boolean isBetter = avoidShadow ?
-                    (shadowDensity < bestScore) :  // 그림자 회피: 더 적은 그림자
-                    (shadowDensity > bestScore);   // 그림자 선호: 더 많은 그림자
-
-            if (isBetter) {
-                bestScore = shadowDensity;
-                bestLat = candidateLat;
-                bestLng = candidateLng;
-            }
-        }
-
-        // 원래 위치와 충분히 다른 경우만 반환
-        double improvement = avoidShadow ?
-                (calculateShadowDensityAtPoint(basePoint.getLat(), basePoint.getLng(), shadowAreas) - bestScore) :
-                (bestScore - calculateShadowDensityAtPoint(basePoint.getLat(), basePoint.getLng(), shadowAreas));
-
-        if (improvement >= 5.0) { // 최소 5% 개선
-            return new RoutePoint(bestLat, bestLng);
-        }
-
-        return null;
-    }
-    private double calculateWaypointEffectiveness(RoutePoint waypoint, List<ShadowArea> shadowAreas, boolean avoidShadow) {
-        double shadowDensity = calculateShadowDensityAtPoint(
-                waypoint.getLat(), waypoint.getLng(), shadowAreas);
-
-        if (avoidShadow) {
-            // 그림자 회피: 그림자가 적을수록 효과적 (100 - 그림자밀도)
-            return 100.0 - shadowDensity;
-        } else {
-            // 그림자 선호: 그림자가 많을수록 효과적 (그림자밀도 그대로)
-            return shadowDensity;
-        }
     }
 }
