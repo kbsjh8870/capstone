@@ -321,12 +321,12 @@ public class ShadowRouteService {
             if (avoidShadow) {
                 // 그림자 회피: 태양 방향으로 우회
                 targetDirection = determineAvoidShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
-                detourMeters = 200.0; // 더 큰 우회
+                detourMeters = 150.0; // 더 큰 우회
                 logger.debug("그림자 회피 모드: 태양방향 기준 우회={}도", targetDirection);
             } else {
                 // 그림자 선호: 태양 반대 방향으로 우회
                 targetDirection = determineFollowShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
-                detourMeters = 250.0; // 더욱 큰 우회로 그림자 찾기
+                detourMeters = 150.0; // 더욱 큰 우회로 그림자 찾기
                 logger.debug("그림자 선호 모드: 그림자 밀집 지역 우회={}도", targetDirection);
             }
 
