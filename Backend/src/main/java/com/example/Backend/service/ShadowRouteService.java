@@ -1591,8 +1591,8 @@ public class ShadowRouteService {
                     JsonNode coordinates = geometry.path("coordinates");
 
                     for (JsonNode coord : coordinates) {
-                        double lng = coord.get(0).asDouble();
-                        double lat = coord.get(1).asDouble();
+                        double lng = Math.round(coord.get(0).asDouble() * 1000000.0) / 1000000.0;
+                        double lat = Math.round(coord.get(1).asDouble() * 1000000.0) / 1000000.0;
 
                         RoutePoint point = new RoutePoint();
                         point.setLat(lat);
