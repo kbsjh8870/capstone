@@ -179,8 +179,8 @@ public class ShadowRouteService {
                 if (isRouteQualityAcceptable(baseRoute, enhancedRoute)) {
                     logger.debug("개선된 경로 생성 성공: {}개 포인트", enhancedRoute.getPoints().size());
 
-                    // 🔧 단일 호출로 모든 그림자 정보 처리
-                    applyShadowInfoWithWaypointCorrection(enhancedRoute, shadowAreas, strategicWaypoint);
+                    //  단일 호출로 모든 그림자 정보 처리
+                    applyShadowInfoWithWaypointCorrection(enhancedRoute, shadowAreas, strategicWaypoint, dateTime, sunPos.getAltitude());
 
                     return enhancedRoute;
                 }
@@ -209,7 +209,9 @@ public class ShadowRouteService {
     /**
      *  통합된 그림자 정보 적용 메서드 (중복 호출 방지)
      */
-    private void applyShadowInfoWithWaypointCorrection(Route route, List<ShadowArea> shadowAreas, RoutePoint waypoint) {
+    private void applyShadowInfoWithWaypointCorrection(Route route, List<ShadowArea> shadowAreas,
+                                                       RoutePoint waypoint, LocalDateTime dateTime,
+                                                       double sunAltitude) {
         try {
             logger.debug("=== 통합 그림자 정보 적용 시작 ===");
 
@@ -224,8 +226,10 @@ public class ShadowRouteService {
 
             List<RoutePoint> points = route.getPoints();
 
+            int hour = dateTime.getHour();
+
             // 1차: 배치 처리로 기본 그림자 검사
-            Map<Integer, Boolean> basicShadowResults = batchCheckBasicShadows(points, shadowAreas);
+            Map<Integer, Boolean> basicShadowResults = batchCheckBasicShadows(points, shadowAreas, hour, sunAltitude);
 
             // 2차: 배치 처리로 상세 분석
             Map<Integer, Boolean> detailedShadowResults = batchCheckDetailedShadows(points, shadowAreas);
@@ -233,7 +237,7 @@ public class ShadowRouteService {
             // 3차: 경유지 근처 특별 보정
             Map<Integer, Boolean> waypointShadowResults = batchCheckWaypointShadows(points, shadowAreas, waypoint);
 
-            // 🔧 모든 결과 통합 적용
+            //  모든 결과 통합 적용
             int shadowCount = 0;
             for (int i = 0; i < points.size(); i++) {
                 RoutePoint point = points.get(i);
@@ -256,7 +260,7 @@ public class ShadowRouteService {
             logger.info("통합 그림자 정보 적용 완료: {}% ({}/{}개 포인트)",
                     shadowPercentage, shadowCount, points.size());
 
-            // 🔧 최종 검증 로깅
+            //  최종 검증 로깅
             logger.debug("=== 최종 그림자 포인트 검증 ===");
             for (int i = 0; i < Math.min(points.size(), 20); i++) {
                 RoutePoint point = points.get(i);
@@ -301,7 +305,7 @@ public class ShadowRouteService {
             }
             waypointPointsWkt.append(")");
 
-            // 🔧 각 그림자 영역에 대해 경유지 근처 포인트들을 관대하게 검사
+            // 각 그림자 영역에 대해 경유지 근처 포인트들을 관대하게 검사
             for (ShadowArea shadowArea : shadowAreas) {
                 String shadowGeom = shadowArea.getShadowGeometry();
                 if (shadowGeom == null || shadowGeom.isEmpty()) continue;
@@ -787,56 +791,7 @@ public class ShadowRouteService {
         return true;
     }
 
-    /**
-     * 실제 DB 그림자 정보를 경로에 적용
-     */
-    private void applyShadowInfoFromDB(Route route, List<ShadowArea> shadowAreas) {
-        if (shadowAreas.isEmpty()) {
-            for (RoutePoint point : route.getPoints()) {
-                point.setInShadow(false);
-            }
-            route.setShadowPercentage(0);
-            logger.debug("그림자 영역이 없음. 모든 포인트를 햇빛으로 설정");
-            return;
-        }
 
-        try {
-            List<RoutePoint> points = route.getPoints();
-
-            // 🚀 1차: 배치 처리로 기본 그림자 검사
-            Map<Integer, Boolean> basicShadowResults = batchCheckBasicShadows(points, shadowAreas);
-
-            // 1차 결과 적용
-            int basicShadowCount = 0;
-            for (int i = 0; i < points.size(); i++) {
-                RoutePoint point = points.get(i);
-                boolean isInShadow = basicShadowResults.getOrDefault(i, false);
-                point.setInShadow(isInShadow);
-                if (isInShadow) basicShadowCount++;
-            }
-
-            logger.debug("1차 배치 그림자 검사 완료: {}개 포인트 감지", basicShadowCount);
-
-            // 🚀 2차: 배치 처리로 상세 분석
-            analyzeRouteDetailedShadows(route, shadowAreas);
-
-            // 최종 통계 (analyzeRouteDetailedShadows에서 이미 계산됨)
-            int finalShadowCount = 0;
-            for (RoutePoint point : points) {
-                if (point.isInShadow()) finalShadowCount++;
-            }
-
-            logger.info("최종 배치 처리 완료: {}% ({}/{}개 포인트)",
-                    route.getShadowPercentage(), finalShadowCount, points.size());
-
-        } catch (Exception e) {
-            logger.error("배치 처리 그림자 정보 적용 오류: " + e.getMessage(), e);
-            for (RoutePoint point : route.getPoints()) {
-                point.setInShadow(false);
-            }
-            route.setShadowPercentage(0);
-        }
-    }
 
     /**
      *  배치 처리로 기본 그림자 검사
@@ -1066,7 +1021,7 @@ public class ShadowRouteService {
 
             logger.debug("경유지 근처 포인트 범위: {} ~ {} (총 {}개)", startIdx, endIdx, endIdx - startIdx + 1);
 
-            // 🔧 경유지 근처 포인트들에 대해 더 관대한 그림자 검사
+            //  경유지 근처 포인트들에 대해 더 관대한 그림자 검사
             for (int i = startIdx; i <= endIdx; i++) {
                 RoutePoint point = points.get(i);
 
@@ -1157,7 +1112,7 @@ public class ShadowRouteService {
      */
     private boolean checkPointInShadowRelaxed(RoutePoint point, String mergedShadows) {
         try {
-            // 🔧 1. 더 정밀한 포함 확인
+            //  1. 더 정밀한 포함 확인
             String containsSql = "SELECT ST_Contains(ST_GeomFromGeoJSON(?), ST_SetSRID(ST_MakePoint(?, ?), 4326))";
             Boolean exactContains = jdbcTemplate.queryForObject(containsSql, Boolean.class,
                     mergedShadows, point.getLng(), point.getLat());
@@ -1166,7 +1121,7 @@ public class ShadowRouteService {
                 return true;
             }
 
-            // 🔧 2. 다중 거리 기준 확인 (10m, 25m, 50m)
+            //  2. 다중 거리 기준 확인 (10m, 25m, 50m)
             String[] distances = {"0.0001", "0.0002", "0.0005"}; // 약 11m, 22m, 55m
 
             for (String distance : distances) {
@@ -1179,7 +1134,7 @@ public class ShadowRouteService {
                 }
             }
 
-            // 🔧 3. 교차 확인 (포인트에서 작은 버퍼 생성해서 교차 검사)
+            //  3. 교차 확인 (포인트에서 작은 버퍼 생성해서 교차 검사)
             String intersectsSql = """
             SELECT ST_Intersects(
                 ST_GeomFromGeoJSON(?), 
@@ -1311,7 +1266,7 @@ public class ShadowRouteService {
      */
     private boolean checkPointDetailedShadow(RoutePoint point, List<ShadowArea> shadowAreas) {
         try {
-            // 🔧 각 그림자 영역별로 개별 검사
+            //  각 그림자 영역별로 개별 검사
             for (ShadowArea shadowArea : shadowAreas) {
                 String shadowGeom = shadowArea.getShadowGeometry();
                 if (shadowGeom == null || shadowGeom.isEmpty()) continue;
@@ -1435,7 +1390,7 @@ public class ShadowRouteService {
                     b.id,
                     b."A16" as height,
                     ST_AsGeoJSON(b.geom) as building_geom,
-                    -- 🔧 다중 그림자 영역 생성 (건물 높이에 따라)
+                    --  다중 그림자 영역 생성 (건물 높이에 따라)
                     ST_AsGeoJSON(
                         ST_Union(ARRAY[
                             -- 기본 건물 영역
@@ -1464,7 +1419,7 @@ public class ShadowRouteService {
                 WHERE ST_Intersects(b.geom, r.geom)
                   AND b."A16" > 1  -- 1m 이상 모든 건물
                 ORDER BY 
-                    -- 🔧 경로와 가까운 건물 우선, 높은 건물 우선
+                    --  경로와 가까운 건물 우선, 높은 건물 우선
                     ST_Distance(b.geom, r.geom) ASC,
                     b."A16" DESC
                 LIMIT 200  -- 더 많은 건물 포함
