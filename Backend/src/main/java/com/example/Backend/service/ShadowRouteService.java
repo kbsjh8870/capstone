@@ -1396,16 +1396,19 @@ public class ShadowRouteService {
             double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
 
             // 태양 고도에 따른 그림자 길이 계산
-            double shadowLength = calculateShadowLength(sunPos.getAltitude());
+            double shadowLength = calculateAdvancedShadowLength(sunPos.getAltitude());
 
-            // 타원형 그림자의 기본 반지름 (건물 주변 영향)
-            double baseRadius = Math.min(shadowLength / 5, 50.0); // 최대 50m
+            // 4단계 그림자 파라미터 계산
+            double baseRadius = Math.min(shadowLength / 8, 30.0);           // 기본 반지름 (최대 30m)
+            double ellipseRadius = Math.min(shadowLength / 6, 40.0);        // 타원 기본 반지름 (최대 40m)
+            double extensionRatio = Math.min(shadowLength / 50.0, 4.0);     // 확장 비율 (최대 4배)
+            double moveDistance = shadowLength * 0.5;                       // 이동 거리 (그림자 길이의 절반)
+            double tallBuildingExtra = shadowLength * 0.8;                  // 높은 건물 추가 그림자
 
-            // 그림자 확장 비율 (방향성)
-            double shadowExtensionRatio = Math.min(shadowLength / 100.0, 3.0); // 최대 3배 확장
-
-            logger.debug("방향성 그림자 계산: 태양고도={}도, 방위각={}도, 그림자방향={}도, 길이={}m",
+            logger.debug("4단계 그림자 계산: 태양고도={}도, 방위각={}도, 그림자방향={}도, 길이={}m",
                     sunPos.getAltitude(), sunPos.getAzimuth(), shadowDirection, shadowLength);
+            logger.debug("파라미터: 기본반지름={}m, 타원반지름={}m, 확장비율={}배, 이동거리={}m",
+                    baseRadius, ellipseRadius, extensionRatio, moveDistance);
 
             String sql = """
             WITH route_area AS (
@@ -1423,44 +1426,42 @@ public class ShadowRouteService {
                     ST_AsGeoJSON(b.geom) as building_geom,
                     ST_AsGeoJSON(
                         ST_Union(ARRAY[
-                            -- 1. 건물 자체
+                            -- 1단계: 건물 자체 (완전 그림자)
                             b.geom,
                             
-                            -- 2. 건물 주변 기본 그림자 (작은 원형)
+                            -- 2단계: 건물 주변 기본 그림자 (작은 원형)
                             ST_Buffer(
                                 ST_Centroid(b.geom),
                                 ? / 111320.0
                             ),
                             
-                            -- 3. 방향성 있는 그림자 (타원형 확장)
+                            -- 3단계: 방향성 있는 그림자 (타원형 확장)
                             ST_Translate(
                                 ST_Scale(
-                                    -- 기본 타원형 생성
                                     ST_Buffer(
                                         ST_Centroid(b.geom), 
                                         ? / 111320.0
                                     ),
-                                    1.0,  -- X축 비율 (폭 유지)
-                                    GREATEST(1.0, ?)  -- Y축 비율 (그림자 방향으로 확장)
+                                    1.0,        -- X축 비율 (폭 유지)
+                                    ?           -- Y축 비율 (그림자 방향으로 확장)
                                 ),
-                                -- 그림자 방향으로 중심 이동 (그림자 길이의 절반)
-                                (? * 0.5) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
-                                (? * 0.5) * sin(radians(?)) / 110540.0
+                                -- 그림자 방향으로 중심 이동
+                                ? * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                                ? * sin(radians(?)) / 110540.0
                             ),
                             
-                            -- 4. 건물 높이 고려한 추가 그림자 (높은 건물은 더 긴 그림자)
+                            -- 4단계: 높은 건물 추가 그림자 (20m 이상만)
                             CASE 
                                 WHEN b."A16" > 20 THEN
                                     ST_Translate(
                                         ST_Buffer(
                                             ST_Centroid(b.geom),
-                                            (? * b."A16" / 50.0) / 111320.0
+                                            (? * LEAST(b."A16" / 30.0, 2.0)) / 111320.0
                                         ),
-                                        (? * 0.8) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
-                                        (? * 0.8) * sin(radians(?)) / 110540.0
+                                        ? * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                                        ? * sin(radians(?)) / 110540.0
                                     )
                                 ELSE
-                                    -- 낮은 건물은 기본 그림자만
                                     ST_GeomFromText('POLYGON EMPTY', 4326)
                             END
                         ])
@@ -1470,26 +1471,27 @@ public class ShadowRouteService {
                   AND b."A16" > 2
                 ORDER BY 
                     ST_Distance(b.geom, 
-                        ST_SetSRID(ST_MakePoint((? + ?) / 2, (? + ?) / 2), 4326)
-                    ) ASC,  -- 경로 중심에서 가까운 순
-                    b."A16" DESC  -- 높은 건물 우선
-                LIMIT 40
+                        ST_SetSRID(ST_MakePoint(?, ?), 4326)
+                    ) ASC,
+                    b."A16" DESC
+                LIMIT 35
             )
             SELECT id, height, building_geom, shadow_geom
             FROM directional_shadows
             """;
 
+            // 정확히 17개 파라미터 전달
             List<Map<String, Object>> results = jdbcTemplate.queryForList(sql,
-                    startLng, startLat, endLng, endLat,    // route_area 좌표
-                    baseRadius,                             // 기본 그림자 반지름
-                    baseRadius,                             // 타원형 기본 반지름
-                    shadowExtensionRatio,                   // Y축 확장 비율
-                    shadowLength, shadowDirection,          // 방향성 이동 (절반)
-                    shadowLength, shadowDirection,
-                    shadowLength, shadowDirection,          // 높은 건물 추가 그림자
-                    shadowLength, shadowDirection,
-                    shadowLength, shadowDirection,
-                    startLng, endLng, startLat, endLat);   // 거리 계산용
+                    startLng, startLat, endLng, endLat,     // 1-4: route_area
+                    baseRadius,                              // 5: 2단계 기본 그림자 반지름
+                    ellipseRadius,                           // 6: 3단계 타원 기본 반지름
+                    extensionRatio,                          // 7: 3단계 Y축 확장 비율
+                    moveDistance, shadowDirection,           // 8-9: 3단계 X축 이동
+                    moveDistance, shadowDirection,           // 10-11: 3단계 Y축 이동
+                    tallBuildingExtra,                       // 12: 4단계 높은 건물 반지름
+                    tallBuildingExtra, shadowDirection,      // 13-14: 4단계 X축 이동
+                    tallBuildingExtra, shadowDirection,      // 15-16: 4단계 Y축 이동
+                    startLng, startLat);                     // 17: 거리 계산용
 
             List<ShadowArea> shadowAreas = new ArrayList<>();
             for (Map<String, Object> row : results) {
@@ -1501,35 +1503,84 @@ public class ShadowRouteService {
                 shadowAreas.add(area);
             }
 
-            logger.info("방향성 그림자 계산 완료: {}개 건물, 방향={}도, 길이={}m, 확장비율={}배",
-                    shadowAreas.size(), shadowDirection, shadowLength, shadowExtensionRatio);
+            logger.info("4단계 그림자 계산 완료: {}개 건물, 방향={}도, 총길이={}m",
+                    shadowAreas.size(), shadowDirection, shadowLength);
+
+            // 🔧 계산 결과 검증
+            if (shadowAreas.isEmpty()) {
+                logger.warn("경로 주변에 그림자를 생성할 건물이 없습니다. 건물 조건을 확인하세요.");
+
+                // 건물 존재 여부 확인
+                return verifyBuildingsInArea(startLat, startLng, endLat, endLng);
+            }
 
             return shadowAreas;
 
         } catch (Exception e) {
-            logger.error("방향성 그림자 계산 오류: " + e.getMessage(), e);
+            logger.error("4단계 그림자 계산 오류: " + e.getMessage(), e);
             return new ArrayList<>();
         }
     }
 
     /**
-     * 태양 고도에 따른 그림자 길이 계산 (개선)
+     * 태양 고도에 따른 그림자 길이 계산
      */
-    private double calculateShadowLength(double solarElevation) {
+    private double calculateAdvancedShadowLength(double solarElevation) {
         if (solarElevation <= 0) {
-            return 500; // 야간/일출전: 긴 그림자
+            return 300; // 야간/일출전: 매우 긴 그림자
         } else if (solarElevation <= 5) {
-            return 400; // 일출/일몰: 매우 긴 그림자
+            return 250; // 일출/일몰: 긴 그림자
         } else if (solarElevation <= 15) {
-            return 200; // 오전/오후: 긴 그림자
+            return 180; // 이른 오전/늦은 오후: 중간 긴 그림자
         } else if (solarElevation <= 30) {
-            return 100; // 중간: 보통 그림자
+            return 120; // 오전/오후: 보통 그림자
+        } else if (solarElevation <= 45) {
+            return 80;  // 중간 높이: 짧은 그림자
         } else if (solarElevation <= 60) {
-            return 60;  // 높은 태양: 짧은 그림자
+            return 50;  // 높은 태양: 더 짧은 그림자
         } else {
-            return 30;  // 정오: 매우 짧은 그림자
+            return 30;  // 정오 근처: 매우 짧은 그림자
         }
     }
+
+    /**
+     * 건물 존재 여부 확인 및 디버깅
+     */
+    private List<ShadowArea> verifyBuildingsInArea(double startLat, double startLng, double endLat, double endLng) {
+        try {
+            String verifySql = """
+            WITH route_area AS (
+                SELECT ST_Buffer(
+                    ST_MakeLine(
+                        ST_SetSRID(ST_MakePoint(?, ?), 4326),
+                        ST_SetSRID(ST_MakePoint(?, ?), 4326)
+                    ), 0.006
+                ) as geom
+            )
+            SELECT 
+                COUNT(*) as total_buildings,
+                COUNT(CASE WHEN b."A16" > 2 THEN 1 END) as valid_buildings,
+                AVG(b."A16") as avg_height,
+                MAX(b."A16") as max_height
+            FROM public."AL_D010_26_20250304" b, route_area r
+            WHERE ST_Intersects(b.geom, r.geom)
+            """;
+
+            Map<String, Object> stats = jdbcTemplate.queryForMap(verifySql,
+                    startLng, startLat, endLng, endLat);
+
+            logger.info("건물 통계: 전체={}개, 유효={}개, 평균높이={}m, 최고높이={}m",
+                    stats.get("total_buildings"), stats.get("valid_buildings"),
+                    stats.get("avg_height"), stats.get("max_height"));
+
+            return new ArrayList<>(); // 빈 리스트 반환
+
+        } catch (Exception e) {
+            logger.error("건물 검증 오류: " + e.getMessage(), e);
+            return new ArrayList<>();
+        }
+    }
+
 
     /**
      * 그림자 영역들을 하나의 GeoJSON으로 병합 (최적화)
@@ -1596,44 +1647,6 @@ public class ShadowRouteService {
             sb.append("]}");
             return sb.toString();
         }
-    }
-
-    /**
-     * 그림자 영역들을 하나의 GeoJSON으로 병합
-     */
-    private String createShadowUnion(List<ShadowArea> shadowAreas) {
-        if (shadowAreas == null || shadowAreas.isEmpty()) {
-            return "{\"type\":\"GeometryCollection\",\"geometries\":[]}";
-        }
-
-        List<ShadowArea> limitedAreas = shadowAreas.size() > 50 ?
-                shadowAreas.subList(0, 50) : shadowAreas;
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("{\"type\":\"GeometryCollection\",\"geometries\":[");
-
-        boolean hasValidGeometry = false;
-        for (int i = 0; i < limitedAreas.size(); i++) {
-            ShadowArea area = limitedAreas.get(i);
-            String shadowGeom = area.getShadowGeometry();
-
-            if (shadowGeom != null && !shadowGeom.isEmpty() && !shadowGeom.equals("null")) {
-                if (hasValidGeometry) {
-                    sb.append(",");
-                }
-                sb.append(shadowGeom);
-                hasValidGeometry = true;
-            }
-        }
-
-        sb.append("]}");
-
-        if (!hasValidGeometry) {
-            return "{\"type\":\"GeometryCollection\",\"geometries\":[]}";
-        }
-
-        logger.debug("그림자 영역 병합 완료: {}개 영역 사용", limitedAreas.size());
-        return sb.toString();
     }
 
     /**
