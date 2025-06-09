@@ -67,7 +67,7 @@ public class TmapApiService {
     /**
      * 경유지가 포함된 보행자 경로 요청
      */
-    public String getWalkingRouteWithWaypoint(
+    public String AsgetWalkingRouteWithWaypoint(
             double startLat, double startLng,
             double waypointLat, double waypointLng,
             double endLat, double endLng) {
