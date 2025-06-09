@@ -92,7 +92,7 @@ public class ShadowRouteService {
                                             List<ShadowArea> shadowAreas, SunPosition sunPos,
                                             boolean avoidShadow, LocalDateTime dateTime) {
         try {
-            logger.debug("=== 개선된 그림자 경로 생성 시작 (적응형 다중 시도) ===");
+            logger.debug("=== 간단한 그림자 경로 생성 시작 ===");
 
             // 기본 경로 먼저 획득
             String baseRouteJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
@@ -104,73 +104,41 @@ public class ShadowRouteService {
                 return baseRoute;
             }
 
-            // *** 태양 고도에 따른 적응형 우회 거리 ***
-            double sunAltitude = sunPos.getAltitude();
-            double[] detourDistances;
+            // 단순화된 경유지 생성 (한 번만 시도)
+            RoutePoint waypoint = createStrategicWaypointWithFixedDistance(
+                    baseRoute.getPoints(), sunPos, avoidShadow, shadowAreas, 0);
 
-            if (avoidShadow) {
-                // 그림자 회피: 더 보수적인 거리들
-                if (sunAltitude < 10) {
-                    detourDistances = new double[]{40.0, 60.0, 80.0, 100.0};
-                } else if (sunAltitude < 30) {
-                    detourDistances = new double[]{50.0, 70.0, 90.0, 120.0};
+            if (waypoint != null) {
+                logger.debug("경유지 생성 성공: ({}, {})", waypoint.getLat(), waypoint.getLng());
+
+                // 경유지를 통한 새 경로 생성
+                String waypointRouteJson = tmapApiService.getWalkingRouteWithWaypoint(
+                        startLat, startLng,
+                        waypoint.getLat(), waypoint.getLng(),
+                        endLat, endLng);
+
+                Route enhancedRoute = parseBasicRoute(waypointRouteJson);
+                enhancedRoute.setAvoidShadow(avoidShadow);
+
+                // 거리 차이 확인 (기본 경로 대비 50% 이내)
+                double distanceRatio = enhancedRoute.getDistance() / baseRoute.getDistance();
+                if (distanceRatio <= 1.5) {
+                    logger.info("간단한 경로 생성 성공: 거리 증가 {}%",
+                            (int)((distanceRatio - 1) * 100));
+                    return enhancedRoute;
                 } else {
-                    detourDistances = new double[]{60.0, 80.0, 100.0, 130.0};
-                }
-            } else {
-                // 그림자 선호: 더 적극적인 거리들
-                detourDistances = new double[]{120.0, 150.0, 180.0, 220.0};
-            }
-
-            logger.debug("태양 고도 {}도에 따른 시도 거리들: {}", sunAltitude, java.util.Arrays.toString(detourDistances));
-
-            for (int attempt = 0; attempt < detourDistances.length; attempt++) {
-                try {
-                    logger.debug("시도 {}: 우회거리 {}m", attempt + 1, detourDistances[attempt]);
-
-                    // 현재 시도에 맞는 경유지 생성
-                    RoutePoint strategicWaypoint = createStrategicWaypointWithFixedDistance(
-                            baseRoute.getPoints(), sunPos, avoidShadow, shadowAreas, detourDistances[attempt]);
-
-                    if (strategicWaypoint != null) {
-                        logger.debug("시도 {} 경유지 생성: ({}, {})",
-                                attempt + 1, strategicWaypoint.getLat(), strategicWaypoint.getLng());
-
-                        // 경유지를 통한 새 경로 생성
-                        String waypointRouteJson = tmapApiService.getWalkingRouteWithWaypoint(
-                                startLat, startLng,
-                                strategicWaypoint.getLat(), strategicWaypoint.getLng(),
-                                endLat, endLng);
-
-                        Route enhancedRoute = parseBasicRoute(waypointRouteJson);
-                        enhancedRoute.setAvoidShadow(avoidShadow);
-
-                        if (isRouteQualityAcceptable(baseRoute, enhancedRoute)) {
-                            logger.info("시도 {} 성공: 우회거리 {}m, 거리 증가 {}%",
-                                    attempt + 1, detourDistances[attempt],
-                                    (int)((enhancedRoute.getDistance() / baseRoute.getDistance() - 1) * 100));
-
-                            // 그림자 정보 적용
-                            applyShadowInfoWithWaypointCorrection(enhancedRoute, shadowAreas, strategicWaypoint);
-                            return enhancedRoute;
-                        } else {
-                            logger.debug("시도 {} 품질 검증 실패", attempt + 1);
-                        }
-                    } else {
-                        logger.debug("시도 {} 경유지 생성 실패", attempt + 1);
-                    }
-                } catch (Exception e) {
-                    logger.warn("시도 {} 오류: {}", attempt + 1, e.getMessage());
+                    logger.warn("경로가 너무 길어짐 ({}%), 기본 경로 사용",
+                            (int)((distanceRatio - 1) * 100));
                 }
             }
 
-            // 모든 시도 실패 시 기본 경로 사용
-            logger.info("모든 시도 실패. 기본 경로 사용");
+            // 실패 시 기본 경로 사용
+            logger.info("경유지 생성 실패. 기본 경로 사용");
             baseRoute.setAvoidShadow(avoidShadow);
             return baseRoute;
 
         } catch (Exception e) {
-            logger.error("적응형 그림자 경로 생성 오류: " + e.getMessage(), e);
+            logger.error("간단한 그림자 경로 생성 오류: " + e.getMessage(), e);
 
             // 실패 시 기본 경로 반환
             try {
@@ -197,41 +165,31 @@ public class ShadowRouteService {
             RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
             RoutePoint middlePoint = basePoints.get(basePoints.size() / 2);
 
-            // 목적지 방향 계산
-            double destinationDirection = calculateDirection(startPoint, endPoint);
-
-            // *** 태양 고도에 따른 적응형 경유지 생성 ***
-            double sunAltitude = sunPos.getAltitude();
-            double adaptiveDetourMeters = fixedDetourMeters;
-
-            // 태양 고도가 낮을수록 더 보수적인 우회
-            if (sunAltitude < 10) {
-                adaptiveDetourMeters *= 0.6;  // 60%로 감소
-                logger.debug("저고도 태양 ({}도): 우회 거리 {}m로 감소", sunAltitude, adaptiveDetourMeters);
-            } else if (sunAltitude < 30) {
-                adaptiveDetourMeters *= 0.8;  // 80%로 감소
-                logger.debug("중간 고도 태양 ({}도): 우회 거리 {}m로 감소", sunAltitude, adaptiveDetourMeters);
+            double detourMeters;
+            if (avoidShadow) {
+                detourMeters = 25.0;  // 기존: 40~130m → 수정: 25m
+            } else {
+                detourMeters = 35.0;  // 기존: 120~220m → 수정: 35m
             }
 
-            // avoidShadow 여부에 따라 방향 결정
             double targetDirection;
             if (avoidShadow) {
-                // *** 그림자 회피: 더 보수적인 방향 선택 ***
-                targetDirection = selectConservativeAvoidDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
-                logger.debug("보수적 그림자 회피 모드: 태양방향 기준 우회={}도, 거리={}m", targetDirection, adaptiveDetourMeters);
+                // 그림자 회피: 태양 방향으로 (햇빛이 있는 곳)
+                targetDirection = sunPos.getAzimuth();
+                logger.debug("그림자 회피: 태양 방향 {}도로 우회", targetDirection);
             } else {
-                // *** 그림자 선호: 실제 그림자 밀집 지역 선택 ***
-                targetDirection = selectActualShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
-                logger.debug("실제 그림자 선호 모드: 그림자 밀집 지역 우회={}도, 거리={}m", targetDirection, adaptiveDetourMeters);
+                // 그림자 선호: 태양 반대 방향으로 (그림자가 있는 곳)
+                targetDirection = (sunPos.getAzimuth() + 180) % 360;
+                logger.debug("그림자 선호: 태양 반대 방향 {}도로 우회", targetDirection);
             }
 
-            // 지리적 좌표로 변환
             double directionRad = Math.toRadians(targetDirection);
             double latDegreeInMeters = 111000.0;
             double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
 
-            double latOffset = adaptiveDetourMeters * Math.cos(directionRad) / latDegreeInMeters;
-            double lngOffset = adaptiveDetourMeters * Math.sin(directionRad) / lngDegreeInMeters;
+            // 올바른 좌표 변환 (North = 0도, East = 90도)
+            double latOffset = detourMeters * Math.cos(directionRad) / latDegreeInMeters;
+            double lngOffset = detourMeters * Math.sin(directionRad) / lngDegreeInMeters;
 
             RoutePoint waypoint = new RoutePoint();
             waypoint.setLat(middlePoint.getLat() + latOffset);
@@ -243,10 +201,12 @@ public class ShadowRouteService {
                 return null;
             }
 
+            logger.info("간단한 경유지 생성 완료: avoidShadow={}, 방향={}도, 거리={}m",
+                    avoidShadow, targetDirection, detourMeters);
             return waypoint;
 
         } catch (Exception e) {
-            logger.error("적응형 경유지 계산 오류: " + e.getMessage(), e);
+            logger.error("간단한 경유지 계산 오류: " + e.getMessage(), e);
             return null;
         }
     }
@@ -674,8 +634,8 @@ public class ShadowRouteService {
      *  두 지점 간의 방향 계산 (도 단위)
      */
     private double calculateDirection(RoutePoint from, RoutePoint to) {
-        double deltaLng = to.getLng() - from.getLng();
         double deltaLat = to.getLat() - from.getLat();
+        double deltaLng = to.getLng() - from.getLng();
 
         double directionRad = Math.atan2(deltaLng, deltaLat);
         double directionDeg = Math.toDegrees(directionRad);
