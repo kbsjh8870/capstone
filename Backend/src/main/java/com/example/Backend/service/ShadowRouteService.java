@@ -1,22 +1,23 @@
 package com.example.Backend.service;
 
-import com.example.Backend.model.*;
+import com.example.Backend.model.Route;
+import com.example.Backend.model.RoutePoint;
+import com.example.Backend.model.ShadowArea;
+import com.example.Backend.model.SunPosition;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.cache.CacheManager;
-import org.springframework.cache.annotation.CacheEvict;
-import org.springframework.cache.annotation.Cacheable;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
-import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 @Service
 public class ShadowRouteService {
@@ -112,7 +113,7 @@ public class ShadowRouteService {
                         strategicWaypoint.getLat(), strategicWaypoint.getLng());
 
                 // 경유지를 통한 새 경로 생성
-                String waypointRouteJson = tmapApiService.AsgetWalkingRouteWithWaypoint(
+                String waypointRouteJson = tmapApiService.getWalkingRouteWithWaypoint(
                         startLat, startLng,
                         strategicWaypoint.getLat(), strategicWaypoint.getLng(),
                         endLat, endLng);
@@ -320,12 +321,12 @@ public class ShadowRouteService {
             if (avoidShadow) {
                 // 그림자 회피: 태양 방향으로 우회
                 targetDirection = determineAvoidShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
-                detourMeters = 150.0; // 더 큰 우회
+                detourMeters = 200.0; // 더 큰 우회
                 logger.debug("그림자 회피 모드: 태양방향 기준 우회={}도", targetDirection);
             } else {
                 // 그림자 선호: 태양 반대 방향으로 우회
                 targetDirection = determineFollowShadowDirection(sunPos, destinationDirection, shadowAreas, middlePoint);
-                detourMeters = 150.0; // 더욱 큰 우회로 그림자 찾기
+                detourMeters = 250.0; // 더욱 큰 우회로 그림자 찾기
                 logger.debug("그림자 선호 모드: 그림자 밀집 지역 우회={}도", targetDirection);
             }
 
@@ -735,7 +736,7 @@ public class ShadowRouteService {
     /**
      * 실제 DB 그림자 정보를 경로에 적용
      */
-    public void applyShadowInfoFromDB(Route route, List<ShadowArea> shadowAreas) {
+    private void applyShadowInfoFromDB(Route route, List<ShadowArea> shadowAreas) {
         if (shadowAreas.isEmpty()) {
             for (RoutePoint point : route.getPoints()) {
                 point.setInShadow(false);
@@ -748,7 +749,7 @@ public class ShadowRouteService {
         try {
             List<RoutePoint> points = route.getPoints();
 
-            //  배치 처리로 기본 그림자 검사
+            // 🚀 1차: 배치 처리로 기본 그림자 검사
             Map<Integer, Boolean> basicShadowResults = batchCheckBasicShadows(points, shadowAreas);
 
             // 1차 결과 적용
@@ -762,7 +763,7 @@ public class ShadowRouteService {
 
             logger.debug("1차 배치 그림자 검사 완료: {}개 포인트 감지", basicShadowCount);
 
-            //배치 처리로 상세 분석
+            // 🚀 2차: 배치 처리로 상세 분석
             analyzeRouteDetailedShadows(route, shadowAreas);
 
             // 최종 통계 (analyzeRouteDetailedShadows에서 이미 계산됨)
@@ -1186,7 +1187,7 @@ public class ShadowRouteService {
     /**
      * 건물 그림자 계산
      */
-    public List<ShadowArea> calculateBuildingShadows(
+    private List<ShadowArea> calculateBuildingShadows(
             double startLat, double startLng, double endLat, double endLng, SunPosition sunPos) {
 
         try {
@@ -1334,7 +1335,7 @@ public class ShadowRouteService {
     /**
      * 기본 T맵 경로 파싱
      */
-    public Route parseBasicRoute(String tmapRouteJson) {
+    private Route parseBasicRoute(String tmapRouteJson) {
         Route route = new Route();
         List<RoutePoint> points = new ArrayList<>();
 
@@ -1426,517 +1427,5 @@ public class ShadowRouteService {
         route.setDuration((int) (distance / 67));
 
         return route;
-    }
-
-
-
-    //--------------------------------------------------------------------------------------------------------------
-
-    /**
-     * 다양한 경로 옵션을 생성하여 그늘과 시간 효율성의 최적 조합 찾기
-     */
-    public List<Route> generateMultipleRouteOptions(
-            double startLat, double startLng,
-            double endLat, double endLng,
-            boolean preferShadow, LocalDateTime dateTime) {
-
-        List<Route> allRoutes = new ArrayList<>();
-        List<CompletableFuture<Route>> futureRoutes = new ArrayList<>();
-
-        try {
-            // 1. 기본 경로
-            CompletableFuture<Route> basicRouteFuture = CompletableFuture.supplyAsync(() -> {
-                try {
-                    String tmapJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
-                    Route route = parseBasicRoute(tmapJson);
-                    route.setBasicRoute(true);
-                    route.setDateTime(dateTime);
-                    return route;
-                } catch (Exception e) {
-                    logger.error("기본 경로 생성 실패", e);
-                    return null;
-                }
-            });
-            futureRoutes.add(basicRouteFuture);
-
-            // 2. 태양 위치 계산
-            SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
-            // 3. 그늘 영역 계산
-            List<ShadowArea> shadowAreas = calculateBuildingShadows(startLat, startLng, endLat, endLng, sunPos);
-
-            // 4. 그늘 밀집 지역 분석
-            List<RoutePoint> shadowHotspots = findShadowHotspots(startLat, startLng, endLat, endLng, shadowAreas);
-
-            // 5. 다양한 경유지 전략으로 경로 생성
-            List<List<RoutePoint>> waypointStrategies = generateWaypointStrategies(
-                    startLat, startLng, endLat, endLng, shadowHotspots, sunPos, preferShadow);
-
-            // 6. 각 전략에 대해 비동기로 경로 계산
-            for (List<RoutePoint> waypoints : waypointStrategies) {
-                CompletableFuture<Route> routeFuture = CompletableFuture.supplyAsync(() ->
-                        calculateRouteWithWaypoints(startLat, startLng, endLat, endLng,
-                                waypoints, shadowAreas, preferShadow, dateTime)
-                );
-                futureRoutes.add(routeFuture);
-            }
-
-            // 7. 모든 경로 계산 완료 대기
-            CompletableFuture.allOf(futureRoutes.toArray(new CompletableFuture[0])).join();
-
-            // 8. 결과 수집 및 필터링
-            for (CompletableFuture<Route> future : futureRoutes) {
-                Route route = future.get();
-                if (route != null && isRouteValid(route, allRoutes)) {
-                    allRoutes.add(route);
-                }
-            }
-
-            // 9. 경로 효율성 점수 계산 및 정렬
-            calculateEfficiencyScores(allRoutes, preferShadow);
-            allRoutes.sort((r1, r2) -> Double.compare(r2.getEfficiencyScore(), r1.getEfficiencyScore()));
-
-            // 10. 상위 5개 경로만 반환
-            return allRoutes.stream().limit(5).collect(Collectors.toList());
-
-        } catch (Exception e) {
-            logger.error("다중 경로 생성 오류", e);
-            return allRoutes;
-        }
-    }
-
-    /**
-     * 그늘 밀집 지역 찾기
-     */
-    private List<RoutePoint> findShadowHotspots(double startLat, double startLng,
-                                                double endLat, double endLng,
-                                                List<ShadowArea> shadowAreas) {
-        List<RoutePoint> hotspots = new ArrayList<>();
-
-        // 경로 영역을 격자로 나누기
-        int gridSize = 10; // 10x10 격자
-        double latStep = (endLat - startLat) / gridSize;
-        double lngStep = (endLng - startLng) / gridSize;
-
-        Map<RoutePoint, Double> shadowDensityMap = new HashMap<>();
-
-        // 각 격자점의 그늘 밀도 계산
-        for (int i = 1; i < gridSize; i++) {
-            for (int j = 1; j < gridSize; j++) {
-                double lat = startLat + (latStep * i);
-                double lng = startLng + (lngStep * j);
-
-                double density = calculateShadowDensityAtPoint(lat, lng, shadowAreas);
-
-                if (density > 30) { // 30% 이상 그늘인 지점
-                    RoutePoint hotspot = new RoutePoint(lat, lng);
-                    shadowDensityMap.put(hotspot, density);
-                }
-            }
-        }
-
-        // 밀도 순으로 정렬하여 상위 지점 선택
-        shadowDensityMap.entrySet().stream()
-                .sorted(Map.Entry.<RoutePoint, Double>comparingByValue().reversed())
-                .limit(10)
-                .forEach(entry -> hotspots.add(entry.getKey()));
-
-        logger.debug("그늘 밀집 지역 {}개 발견", hotspots.size());
-        return hotspots;
-    }
-
-    /**
-     * 다양한 경유지 전략 생성
-     */
-    private List<List<RoutePoint>> generateWaypointStrategies(
-            double startLat, double startLng, double endLat, double endLng,
-            List<RoutePoint> shadowHotspots, SunPosition sunPos, boolean preferShadow) {
-
-        List<List<RoutePoint>> strategies = new ArrayList<>();
-
-        // 전략 1: 단일 중간 경유지 (8방향)
-        double midLat = (startLat + endLat) / 2;
-        double midLng = (startLng + endLng) / 2;
-
-        double[] directions = {0, 45, 90, 135, 180, 225, 270, 315};
-        double[] distances = {100, 200, 300}; // 미터
-
-        for (double direction : directions) {
-            for (double distance : distances) {
-                RoutePoint waypoint = calculateWaypointByDirection(midLat, midLng, direction, distance);
-                strategies.add(Arrays.asList(waypoint));
-            }
-        }
-
-        // 전략 2: 그늘 밀집 지역 경유
-        for (RoutePoint hotspot : shadowHotspots) {
-            strategies.add(Arrays.asList(hotspot));
-
-            // 두 개의 그늘 지역 조합
-            if (shadowHotspots.size() > 1) {
-                for (RoutePoint hotspot2 : shadowHotspots) {
-                    if (!hotspot.equals(hotspot2)) {
-                        // 순서를 고려한 경유
-                        if (isOrderedPath(startLat, startLng, hotspot, hotspot2, endLat, endLng)) {
-                            strategies.add(Arrays.asList(hotspot, hotspot2));
-                        }
-                    }
-                }
-            }
-        }
-
-        // 전략 3: 구간별 경유지
-        int segments = 3;
-        for (int i = 1; i < segments; i++) {
-            double segmentLat = startLat + ((endLat - startLat) * i / segments);
-            double segmentLng = startLng + ((endLng - startLng) * i / segments);
-
-            // 각 구간에서 좌우로 경유지 생성
-            double perpDirection = calculatePerpendicularDirection(startLat, startLng, endLat, endLng);
-
-            RoutePoint leftWaypoint = calculateWaypointByDirection(segmentLat, segmentLng, perpDirection, 150);
-            RoutePoint rightWaypoint = calculateWaypointByDirection(segmentLat, segmentLng, (perpDirection + 180) % 360, 150);
-
-            strategies.add(Arrays.asList(leftWaypoint));
-            strategies.add(Arrays.asList(rightWaypoint));
-        }
-
-        logger.debug("총 {}개의 경유지 전략 생성", strategies.size());
-        return strategies;
-    }
-
-    /**
-     * 경유지를 포함한 경로 계산
-     */
-    private Route calculateRouteWithWaypoints(double startLat, double startLng,
-                                              double endLat, double endLng,
-                                              List<RoutePoint> waypoints,
-                                              List<ShadowArea> shadowAreas,
-                                              boolean preferShadow,
-                                              LocalDateTime dateTime) {
-        try {
-            String routeJson;
-
-            if (waypoints.isEmpty()) {
-                routeJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
-            } else if (waypoints.size() == 1) {
-                RoutePoint wp = waypoints.get(0);
-                routeJson = tmapApiService.AsgetWalkingRouteWithWaypoint(
-                        startLat, startLng, wp.getLat(), wp.getLng(), endLat, endLng);
-            } else {
-                routeJson = tmapApiService.getWalkingRouteWithMultiWaypoints(
-                        startLat, startLng, waypoints, endLat, endLng);
-            }
-
-            Route route = parseBasicRoute(routeJson);
-            route.setBasicRoute(false);
-            route.setAvoidShadow(preferShadow);
-            route.setDateTime(dateTime);
-
-            // 그림자 정보 적용
-            applyShadowInfoFromDB(route, shadowAreas);
-
-            return route;
-
-        } catch (Exception e) {
-            logger.error("경유지 경로 계산 실패", e);
-            return null;
-        }
-    }
-
-    /**
-     * 경로 효율성 점수 계산
-     */
-    private void calculateEfficiencyScores(List<Route> routes, boolean preferShadow) {
-        if (routes.isEmpty()) return;
-
-        // 기본 경로 찾기
-        Route baseRoute = routes.stream()
-                .filter(Route::isBasicRoute)
-                .findFirst()
-                .orElse(routes.get(0));
-
-        double baseDistance = baseRoute.getDistance();
-
-        for (Route route : routes) {
-            double distanceRatio = route.getDistance() / baseDistance;
-            double shadowRatio = route.getShadowPercentage() / 100.0;
-
-            double score;
-            if (preferShadow) {
-                // 그늘 선호: 그늘 비율을 높게, 거리 증가를 낮게 평가
-                score = (shadowRatio * 0.7) - ((distanceRatio - 1) * 0.3);
-            } else {
-                // 햇빛 선호: 그늘 비율을 낮게, 거리 증가를 낮게 평가
-                score = ((1 - shadowRatio) * 0.7) - ((distanceRatio - 1) * 0.3);
-            }
-
-            // 시간당 그늘/햇빛 효율성 고려
-            double timeEfficiency = route.getDuration() > 0 ?
-                    (preferShadow ? shadowRatio : (1 - shadowRatio)) / (route.getDuration() / 60.0) : 0;
-
-            score += timeEfficiency * 0.2;
-
-            route.setEfficiencyScore(score);
-
-            logger.debug("경로 점수: 거리비율={}, 그늘비율={}, 점수={}",
-                    distanceRatio, shadowRatio, score);
-        }
-    }
-
-    /**
-     * 경로 유효성 검사
-     */
-    private boolean isRouteValid(Route route, List<Route> allRoutes) {
-        if (route == null || route.getPoints().isEmpty()) {
-            return false;
-        }
-
-        // 기본 경로는 항상 포함
-        if (route.isBasicRoute()) {
-            return true;
-        }
-
-        // 거리가 기본 경로의 1.5배를 초과하면 제외
-        Route baseRoute = allRoutes.stream()
-                .filter(Route::isBasicRoute)
-                .findFirst()
-                .orElse(null);
-
-        if (baseRoute != null && route.getDistance() > baseRoute.getDistance() * 1.5) {
-            logger.debug("경로 제외: 거리 초과 ({}m > {}m)",
-                    route.getDistance(), baseRoute.getDistance() * 1.5);
-            return false;
-        }
-
-        // 경로 포인트가 너무 적으면 제외
-        if (route.getPoints().size() < 10) {
-            logger.debug("경로 제외: 포인트 수 부족 ({}개)", route.getPoints().size());
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * 방향과 거리로 경유지 계산
-     */
-    private RoutePoint calculateWaypointByDirection(double lat, double lng,
-                                                    double direction, double distanceMeters) {
-        double dirRad = Math.toRadians(direction);
-        double latOffset = (distanceMeters * Math.cos(dirRad)) / 111000.0;
-        double lngOffset = (distanceMeters * Math.sin(dirRad)) /
-                (111000.0 * Math.cos(Math.toRadians(lat)));
-
-        return new RoutePoint(lat + latOffset, lng + lngOffset);
-    }
-
-    /**
-     * 두 점을 잇는 선에 수직인 방향 계산
-     */
-    private double calculatePerpendicularDirection(double lat1, double lng1,
-                                                   double lat2, double lng2) {
-        double direction = calculateDirection(new RoutePoint(lat1, lng1),
-                new RoutePoint(lat2, lng2));
-        return (direction + 90) % 360;
-    }
-
-    /**
-     * 경유지들이 순서대로 배치되어 있는지 확인
-     */
-    private boolean isOrderedPath(double startLat, double startLng,
-                                  RoutePoint wp1, RoutePoint wp2,
-                                  double endLat, double endLng) {
-        // 각 구간의 거리 계산
-        double dist1 = calculateDistance(startLat, startLng, wp1.getLat(), wp1.getLng());
-        double dist2 = calculateDistance(wp1.getLat(), wp1.getLng(), wp2.getLat(), wp2.getLng());
-        double dist3 = calculateDistance(wp2.getLat(), wp2.getLng(), endLat, endLng);
-
-        double totalWithWaypoints = dist1 + dist2 + dist3;
-        double directDistance = calculateDistance(startLat, startLng, endLat, endLng);
-
-        // 전체 거리가 직선 거리의 2배를 초과하면 비효율적
-        return totalWithWaypoints < directDistance * 2;
-    }
-
-    /**
-     * 경로 상세 분석
-     */
-    public RouteAnalysis analyzeRouteDetails(Route route) {
-        RouteAnalysis analysis = new RouteAnalysis();
-
-        analysis.setRouteId(route.getId());
-        analysis.setTotalDistance(route.getDistance());
-        analysis.setTotalDuration(route.getDuration());
-        analysis.setShadowPercentage(route.getShadowPercentage());
-        analysis.setEfficiencyScore(route.getEfficiencyScore());
-
-        // 구간별 분석
-        List<RouteAnalysis.SegmentAnalysis> segments = analyzeSegments(route);
-        analysis.setSegments(segments);
-
-        // 시간대별 그림자 변화 분석
-        Map<Integer, Integer> hourlyShadow = analyzeHourlyShadowChanges(route);
-        analysis.setHourlyShhadowPercentage(hourlyShadow);
-
-        // 경로 특성 분석
-        RouteAnalysis.RouteCharacteristics characteristics = analyzeCharacteristics(route);
-        analysis.setCharacteristics(characteristics);
-
-        return analysis;
-    }
-
-    /**
-     * 구간별 분석
-     */
-    private List<RouteAnalysis.SegmentAnalysis> analyzeSegments(Route route) {
-        List<RouteAnalysis.SegmentAnalysis> segments = new ArrayList<>();
-        List<RoutePoint> points = route.getPoints();
-
-        int segmentSize = Math.max(10, points.size() / 10); // 10개 구간으로 나누기
-
-        for (int i = 0; i < points.size(); i += segmentSize) {
-            int endIndex = Math.min(i + segmentSize, points.size() - 1);
-
-            RouteAnalysis.SegmentAnalysis segment = new RouteAnalysis.SegmentAnalysis();
-            segment.setStartIndex(i);
-            segment.setEndIndex(endIndex);
-
-            // 구간 거리 계산
-            double segmentDistance = 0;
-            int shadowCount = 0;
-
-            for (int j = i; j < endIndex; j++) {
-                RoutePoint p1 = points.get(j);
-                RoutePoint p2 = points.get(j + 1);
-
-                segmentDistance += calculateDistance(
-                        p1.getLat(), p1.getLng(),
-                        p2.getLat(), p2.getLng()
-                );
-
-                if (p1.isInShadow()) {
-                    shadowCount++;
-                }
-            }
-
-            segment.setDistance(segmentDistance);
-            segment.setDuration((int)(segmentDistance / 67)); // 평균 보행 속도
-            segment.setInShadow(shadowCount > (endIndex - i) / 2); // 50% 이상이면 그림자 구간
-            segment.setShadowDensity((double)shadowCount / (endIndex - i) * 100);
-
-            segments.add(segment);
-        }
-
-        return segments;
-    }
-
-    /**
-     * 시간대별 그림자 변화 분석
-     */
-    private Map<Integer, Integer> analyzeHourlyShadowChanges(Route route) {
-        Map<Integer, Integer> hourlyShadow = new HashMap<>();
-        LocalDateTime baseTime = route.getDateTime();
-
-        // 현재 시간 기준 전후 3시간 분석
-        for (int hourOffset = -3; hourOffset <= 3; hourOffset++) {
-            LocalDateTime checkTime = baseTime.plusHours(hourOffset);
-            int hour = checkTime.getHour();
-
-            // 태양 위치 재계산
-            SunPosition sunPos = shadowService.calculateSunPosition(
-                    route.getPoints().get(0).getLat(),
-                    route.getPoints().get(0).getLng(),
-                    checkTime
-            );
-
-            // 간단한 추정 (실제로는 더 정확한 계산 필요)
-            int estimatedShadow = route.getShadowPercentage();
-
-            if (sunPos.getAltitude() < 20) {
-                estimatedShadow = Math.min(100, estimatedShadow + 20);
-            } else if (sunPos.getAltitude() > 60) {
-                estimatedShadow = Math.max(0, estimatedShadow - 20);
-            }
-
-            hourlyShadow.put(hour, estimatedShadow);
-        }
-
-        return hourlyShadow;
-    }
-
-    /**
-     * 경로 특성 분석
-     */
-    private RouteAnalysis.RouteCharacteristics analyzeCharacteristics(Route route) {
-        RouteAnalysis.RouteCharacteristics characteristics =
-                new RouteAnalysis.RouteCharacteristics();
-
-        // 회전 지점 계산
-        int turningPoints = 0;
-        List<RoutePoint> points = route.getPoints();
-
-        for (int i = 1; i < points.size() - 1; i++) {
-            double angle = calculateTurningAngle(
-                    points.get(i-1), points.get(i), points.get(i+1)
-            );
-
-            if (Math.abs(angle) > 30) { // 30도 이상 회전
-                turningPoints++;
-            }
-        }
-
-        characteristics.setTurningPoints(turningPoints);
-
-        // 평균 그림자 밀도
-        double avgShadowDensity = route.getShadowPercentage();
-        characteristics.setAverageShadowDensity(avgShadowDensity);
-
-        // 추천 시간대
-        if (route.isAvoidShadow()) {
-            characteristics.setRecommendedTimeOfDay("morning"); // 아침에 그림자가 적음
-        } else {
-            characteristics.setRecommendedTimeOfDay("afternoon"); // 오후에 그림자가 많음
-        }
-
-        return characteristics;
-    }
-
-    /**
-     * 회전 각도 계산
-     */
-    private double calculateTurningAngle(RoutePoint p1, RoutePoint p2, RoutePoint p3) {
-        double angle1 = Math.atan2(p2.getLat() - p1.getLat(), p2.getLng() - p1.getLng());
-        double angle2 = Math.atan2(p3.getLat() - p2.getLat(), p3.getLng() - p2.getLng());
-
-        double angle = Math.toDegrees(angle2 - angle1);
-
-        // -180 ~ 180 범위로 정규화
-        while (angle > 180) angle -= 360;
-        while (angle < -180) angle += 360;
-
-        return angle;
-    }
-
-    @Autowired
-    private CacheManager cacheManager;
-
-    /**
-     * 캐시를 활용한 다중 경로 생성
-     */
-    @Cacheable(value = "routes", key = "#startLat + ',' + #startLng + ',' + #endLat + ',' + #endLng + ',' + #preferShadow + ',' + #dateTime.toLocalDate()")
-    public List<Route> generateMultipleRouteOptionsWithCache(
-            double startLat, double startLng,
-            double endLat, double endLng,
-            boolean preferShadow, LocalDateTime dateTime) {
-
-        return generateMultipleRouteOptions(startLat, startLng, endLat, endLng, preferShadow, dateTime);
-    }
-
-    /**
-     * 캐시 무효화
-     */
-    @CacheEvict(value = "routes", allEntries = true)
-    public void clearRouteCache() {
-        logger.info("경로 캐시 초기화");
     }
 }
