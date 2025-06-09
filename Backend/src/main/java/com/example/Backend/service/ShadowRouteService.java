@@ -165,29 +165,42 @@ public class ShadowRouteService {
             RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
             RoutePoint middlePoint = basePoints.get(basePoints.size() / 2);
 
-            double detourMeters;
-            if (avoidShadow) {
-                detourMeters = 25.0;  // 기존: 40~130m → 수정: 25m
-            } else {
-                detourMeters = 35.0;  // 기존: 120~220m → 수정: 35m
-            }
+            double detourMeters = 30.0;  // 모든 경우에 30m로 통일
 
             double targetDirection;
             if (avoidShadow) {
-                // 그림자 회피: 태양 방향으로 (햇빛이 있는 곳)
-                targetDirection = sunPos.getAzimuth();
-                logger.debug("그림자 회피: 태양 방향 {}도로 우회", targetDirection);
-            } else {
-                // 그림자 선호: 태양 반대 방향으로 (그림자가 있는 곳)
+                // 그림자 회피: 태양 반대 방향으로 가야 햇빛 영역에 도달
+                // (태양이 동쪽에 있으면 서쪽으로 가야 그림자를 피할 수 있음)
                 targetDirection = (sunPos.getAzimuth() + 180) % 360;
-                logger.debug("그림자 선호: 태양 반대 방향 {}도로 우회", targetDirection);
+                logger.debug("그림자 회피: 태양 반대 방향 {}도로 우회 (햇빛 구간 증가 목표)", targetDirection);
+            } else {
+                // 그림자 선호: 태양 방향으로 가서 그림자 영역에 진입
+                // (태양이 동쪽에 있으면 동쪽으로 가서 건물 그림자에 진입)
+                targetDirection = sunPos.getAzimuth();
+                logger.debug("그림자 선호: 태양 방향 {}도로 우회 (그림자 구간 증가 목표)", targetDirection);
             }
 
+            double destinationDirection = calculateDirection(startPoint, endPoint);
+            double directionDiff = Math.min(Math.abs(targetDirection - destinationDirection),
+                    360 - Math.abs(targetDirection - destinationDirection));
+
+            // 목적지와 너무 반대 방향이면 조정 (±120도 내로 제한)
+            if (directionDiff > 120) {
+                if (avoidShadow) {
+                    // 그림자 회피: 목적지 방향 기준 ±90도로 조정
+                    targetDirection = (destinationDirection + 90) % 360;
+                } else {
+                    // 그림자 선호: 목적지 방향 기준 ±90도로 조정
+                    targetDirection = (destinationDirection - 90 + 360) % 360;
+                }
+                logger.debug("극단적 우회 방지: 조정된 방향 {}도", targetDirection);
+            }
+
+            // 좌표 변환
             double directionRad = Math.toRadians(targetDirection);
             double latDegreeInMeters = 111000.0;
             double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
 
-            // 올바른 좌표 변환 (North = 0도, East = 90도)
             double latOffset = detourMeters * Math.cos(directionRad) / latDegreeInMeters;
             double lngOffset = detourMeters * Math.sin(directionRad) / lngDegreeInMeters;
 
@@ -201,12 +214,12 @@ public class ShadowRouteService {
                 return null;
             }
 
-            logger.info("간단한 경유지 생성 완료: avoidShadow={}, 방향={}도, 거리={}m",
-                    avoidShadow, targetDirection, detourMeters);
+            logger.info("수정된 경유지 생성: avoidShadow={}, 태양방향={}도, 우회방향={}도, 거리={}m",
+                    avoidShadow, sunPos.getAzimuth(), targetDirection, detourMeters);
             return waypoint;
 
         } catch (Exception e) {
-            logger.error("간단한 경유지 계산 오류: " + e.getMessage(), e);
+            logger.error("수정된 경유지 계산 오류: " + e.getMessage(), e);
             return null;
         }
     }
@@ -903,51 +916,55 @@ public class ShadowRouteService {
      */
     private void applyShadowInfoFromDB(Route route, List<ShadowArea> shadowAreas) {
         if (shadowAreas.isEmpty()) {
+
             for (RoutePoint point : route.getPoints()) {
                 point.setInShadow(false);
             }
             route.setShadowPercentage(0);
-            logger.debug("그림자 영역이 없음. 모든 포인트를 햇빛으로 설정");
+            logger.debug("그림자 영역이 없음. 모든 포인트를 햇빛으로 설정 (0%)");
             return;
         }
 
         try {
             List<RoutePoint> points = route.getPoints();
 
-            // 배치 처리로 기본 그림자 검사
-            Map<Integer, Boolean> basicShadowResults = batchCheckBasicShadows(points, shadowAreas);
+            // 배치 처리로 그림자 검사
+            Map<Integer, Boolean> shadowResults = batchCheckBasicShadows(points, shadowAreas);
 
-            // 1차 결과 적용
-            int basicShadowCount = 0;
+
+            int shadowCount = 0;
             for (int i = 0; i < points.size(); i++) {
                 RoutePoint point = points.get(i);
-                boolean isInShadow = basicShadowResults.getOrDefault(i, false);
+                boolean isInShadow = shadowResults.getOrDefault(i, false);
                 point.setInShadow(isInShadow);
-                if (isInShadow) basicShadowCount++;
+                if (isInShadow) {
+                    shadowCount++;
+                }
             }
 
-            logger.debug("1차 배치 그림자 검사 완료: {}개 포인트 감지", basicShadowCount);
+            int shadowPercentage = points.size() > 0 ? (shadowCount * 100 / points.size()) : 0;
+            route.setShadowPercentage(shadowPercentage);
 
-            // 배치 처리로 상세 분석
-            analyzeRouteDetailedShadows(route, shadowAreas);
+            logger.info("그림자 정보 적용 완료: {}% ({}/{}개 포인트) - avoidShadow={}",
+                    shadowPercentage, shadowCount, points.size(), route.isAvoidShadow());
 
-            // 최종 통계 (analyzeRouteDetailedShadows에서 이미 계산됨)
-            int finalShadowCount = 0;
-            for (RoutePoint point : points) {
-                if (point.isInShadow()) finalShadowCount++;
+
+            if (route.isAvoidShadow() && shadowPercentage > 50) {
+                logger.warn("그림자 회피 경로인데 그림자 비율이 높음: {}%", shadowPercentage);
+            } else if (!route.isAvoidShadow() && shadowPercentage < 30) {
+                logger.warn("그림자 선호 경로인데 그림자 비율이 낮음: {}%", shadowPercentage);
             }
-
-            logger.info("최종 배치 처리 완료: {}% ({}/{}개 포인트)",
-                    route.getShadowPercentage(), finalShadowCount, points.size());
 
         } catch (Exception e) {
-            logger.error("배치 처리 그림자 정보 적용 오류: " + e.getMessage(), e);
+            logger.error("그림자 정보 적용 오류: " + e.getMessage(), e);
+            // 오류 시 안전한 기본값 설정
             for (RoutePoint point : route.getPoints()) {
                 point.setInShadow(false);
             }
             route.setShadowPercentage(0);
         }
     }
+
 
     /**
      *  배치 처리로 기본 그림자 검사
@@ -957,6 +974,10 @@ public class ShadowRouteService {
 
         try {
             String mergedShadows = createShadowUnion(shadowAreas);
+            if (mergedShadows.equals("{\"type\":\"GeometryCollection\",\"geometries\":[]}")) {
+                logger.debug("병합된 그림자 영역이 비어있음");
+                return results;
+            }
 
             // 모든 포인트를 MULTIPOINT로 변환
             StringBuilder pointsWkt = new StringBuilder("MULTIPOINT(");
@@ -967,51 +988,41 @@ public class ShadowRouteService {
             }
             pointsWkt.append(")");
 
-            // 더 관대한 기준으로 그림자 검사 (특히 경유지 근처)
+            // 🔥 더 정확한 그림자 검사 쿼리
             String batchSql = """
-            WITH shadow_geom AS (
-                SELECT ST_GeomFromGeoJSON(?) as geom
-            ),
-            route_points AS (
-                SELECT 
-                    (ST_Dump(ST_GeomFromText(?, 4326))).geom as point_geom,
-                    generate_series(1, ST_NumGeometries(ST_GeomFromText(?, 4326))) as point_index
-            )
+        WITH shadow_geom AS (
+            SELECT ST_GeomFromGeoJSON(?) as geom
+        ),
+        route_points AS (
             SELECT 
-                rp.point_index - 1 as index,
-                CASE 
-                    WHEN ST_Contains(sg.geom, rp.point_geom) THEN true
-                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0003) THEN true  -- 약 33m
-                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0005) THEN true  -- 약 55m  
-                    WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0008) THEN true  -- 약 88m (경유지용)
-                    ELSE false
-                END as in_shadow,
-                ST_Distance(sg.geom, rp.point_geom) as distance_to_shadow
-            FROM route_points rp, shadow_geom sg
-            ORDER BY rp.point_index
-            """;
+                (ST_Dump(ST_GeomFromText(?, 4326))).geom as point_geom,
+                generate_series(1, ST_NumGeometries(ST_GeomFromText(?, 4326))) as point_index
+        )
+        SELECT 
+            rp.point_index - 1 as index,
+            CASE 
+                WHEN ST_Contains(sg.geom, rp.point_geom) THEN true
+                WHEN ST_DWithin(sg.geom, rp.point_geom, 0.0002) THEN true  -- 약 22m 이내
+                ELSE false
+            END as in_shadow
+        FROM route_points rp, shadow_geom sg
+        ORDER BY rp.point_index
+        """;
 
             List<Map<String, Object>> batchResults = jdbcTemplate.queryForList(batchSql,
                     mergedShadows, pointsWkt.toString(), pointsWkt.toString());
 
-            // 결과 매핑
             for (Map<String, Object> row : batchResults) {
                 int index = ((Number) row.get("index")).intValue();
                 boolean inShadow = (Boolean) row.get("in_shadow");
-                double distance = ((Number) row.get("distance_to_shadow")).doubleValue();
-
                 results.put(index, inShadow);
-
-                //  경유지 근처 포인트 디버깅
-                if (inShadow && distance > 0.0005) {
-                    logger.debug("확장 범위에서 그림자 감지: 포인트={}, 거리={}m", index, distance * 111000);
-                }
             }
 
-            logger.debug("확장 범위 그림자 검사 완료: {}개 포인트 처리", results.size());
+            logger.debug("배치 그림자 검사 완료: {}개 포인트 중 {}개가 그림자",
+                    points.size(), results.values().stream().mapToInt(b -> b ? 1 : 0).sum());
 
         } catch (Exception e) {
-            logger.error("확장 범위 그림자 검사 오류: " + e.getMessage(), e);
+            logger.error("배치 그림자 검사 오류: " + e.getMessage(), e);
         }
 
         return results;
