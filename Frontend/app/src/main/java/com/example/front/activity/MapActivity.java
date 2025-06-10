@@ -1486,3 +1486,4 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         clearAllRoutes();
     }
 }
+//git push
