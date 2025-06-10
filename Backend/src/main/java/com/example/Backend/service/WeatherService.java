@@ -30,6 +30,11 @@ public class WeatherService {
      */
     public boolean isBadWeather(double lat, double lng) {
         try {
+
+            logger.info("🔧 DEBUG - weatherApiKey 값: '{}'", weatherApiKey);
+            logger.info("🔧 DEBUG - weatherApiKey 길이: {}", weatherApiKey != null ? weatherApiKey.length() : "null");
+            logger.info("🔧 DEBUG - isEmpty 체크: {}", weatherApiKey == null || weatherApiKey.trim().isEmpty());
+
             if (weatherApiKey == null || weatherApiKey.trim().isEmpty()) {
                 logger.debug("날씨 API 키가 설정되지 않음 → 기본값(좋은 날씨) 사용");
                 return false;
