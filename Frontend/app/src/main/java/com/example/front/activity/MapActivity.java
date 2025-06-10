@@ -515,7 +515,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     }
 
     /**
-     * 그림자 정보를 고려한 경로 요청
+     * 후보 경로 요청 - 사용자가 선택한 시간 사용
      */
     private void requestCandidateRoutes() {
         if (currentLocation == null || destinationPoint == null) {
@@ -526,9 +526,12 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         progressBar.setVisibility(View.VISIBLE);
         tvRouteInfo.setVisibility(View.GONE);
 
-        // API 호출
         Thread apiThread = new Thread(() -> {
             try {
+                // 🎯 사용자가 선택한 시간 사용 (selectedDateTime)
+                Log.d(TAG, "사용자 선택 시간: " + selectedDateTime);
+                Log.d(TAG, "선택 시간 (시): " + selectedDateTime.getHour());
+
                 String url = String.format(
                         "%s/api/routes/candidate-routes?startLat=%f&startLng=%f&endLat=%f&endLng=%f&dateTime=%s",
                         SERVER_URL,
@@ -536,9 +539,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                         currentLocation.getLongitude(),
                         destinationPoint.getLatitude(),
                         destinationPoint.getLongitude(),
-                        URLEncoder.encode(LocalDateTime.now().toString(), "UTF-8"));
+                        URLEncoder.encode(selectedDateTime.toString(), "UTF-8")); // 사용자 선택 시간
 
-                Log.d(TAG, "후보 경로 요청 URL: " + url);
+                Log.d(TAG, "후보 경로 요청 URL (사용자 선택 시간): " + url);
 
                 HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
                 conn.setRequestMethod("GET");
@@ -564,9 +567,18 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 JSONObject responseJson = new JSONObject(response.toString());
                 JSONArray candidatesArray = responseJson.getJSONArray("candidates");
 
+                // 🌤️ 날씨 메시지 확인
+                String weatherMessage = responseJson.optString("weatherMessage", "");
+                Log.d(TAG, "날씨 메시지: " + weatherMessage);
+
                 runOnUiThread(() -> {
                     progressBar.setVisibility(View.GONE);
                     try {
+                        // 날씨 메시지가 있으면 토스트로 표시
+                        if (!weatherMessage.isEmpty()) {
+                            Toast.makeText(MapActivity.this, weatherMessage, Toast.LENGTH_LONG).show();
+                        }
+
                         parseCandidatesAndShowDialog(candidatesArray);
                     } catch (Exception e) {
                         Log.e(TAG, "후보 경로 표시 오류: " + e.getMessage(), e);
@@ -1289,13 +1301,16 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             // 날짜/시간 선택 버튼 이벤트
             btnSelectTime.setOnClickListener(v -> {
                 showDateTimePickerDialog(selectedDateTime, newDateTime -> {
-                    selectedDateTime = newDateTime;
+                    selectedDateTime = newDateTime; // 사용자 선택 시간 저장
                     updateTimeDisplay(tvSelectedTime, selectedDateTime);
 
-                    isInitialRouteDisplay = false;
+                    Log.d(TAG, "시간 변경됨: " + selectedDateTime + " (" + selectedDateTime.getHour() + "시)");
 
-                    // 경로가 설정된 상태라면 재계산
+                    // 🔄 시간 변경 시 즉시 새 경로 계산
                     if (currentLocation != null && destinationPoint != null) {
+                        Toast.makeText(MapActivity.this,
+                                "선택한 시간(" + selectedDateTime.getHour() + "시)의 그림자를 계산 중...",
+                                Toast.LENGTH_SHORT).show();
                         requestCandidateRoutes();
                     }
                 });
@@ -1471,3 +1486,4 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         clearAllRoutes();
     }
 }
+//git push
