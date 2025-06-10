@@ -116,7 +116,7 @@ public class WeatherService {
     public String getWeatherDescription(double lat, double lng) {
         try {
             if (weatherApiKey == null || weatherApiKey.trim().isEmpty()) {
-                return "날씨 정보 없음 (API 키 미설정)";
+                return "날씨 정보 없음";
             }
 
             String url = String.format(
@@ -131,8 +131,10 @@ public class WeatherService {
                 String description = weatherData.get("weather").get(0).get("description").asText();
                 double temp = weatherData.get("main").get("temp").asDouble();
                 int humidity = weatherData.get("main").get("humidity").asInt();
+                int cloudiness = weatherData.get("clouds").get("all").asInt();
 
-                return String.format("%s, %.1f°C, 습도 %d%%", description, temp, humidity);
+                return String.format("%s, %.1f°C, 습도 %d%%, 구름 %d%%",
+                        description, temp, humidity, cloudiness);
             }
 
         } catch (Exception e) {
@@ -147,11 +149,12 @@ public class WeatherService {
      */
     public String getRouteRecommendationMessage(double lat, double lng) {
         boolean isBad = isBadWeather(lat, lng);
+        String weatherDesc = getWeatherDescription(lat, lng);
 
         if (isBad) {
-            return "현재 날씨가 좋지 않아 최단경로를 추천드립니다.";
+            return String.format("현재 날씨(%s)가 좋지 않아 안전한 최단경로를 추천드립니다.", weatherDesc);
         } else {
-            return "날씨가 좋아 다양한 경로를 추천드립니다.";
+            return String.format("현재 날씨(%s)가 좋아 다양한 경로를 추천드립니다.", weatherDesc);
         }
     }
 }
