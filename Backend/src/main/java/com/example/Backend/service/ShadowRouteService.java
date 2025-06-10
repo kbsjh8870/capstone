@@ -736,7 +736,7 @@ public class ShadowRouteService {
     /**
      * 실제 DB 그림자 정보를 경로에 적용
      */
-    private void applyShadowInfoFromDB(Route route, List<ShadowArea> shadowAreas) {
+    public void applyShadowInfoFromDB(Route route, List<ShadowArea> shadowAreas) {
         if (shadowAreas.isEmpty()) {
             for (RoutePoint point : route.getPoints()) {
                 point.setInShadow(false);
@@ -1187,7 +1187,7 @@ public class ShadowRouteService {
     /**
      * 건물 그림자 계산
      */
-    private List<ShadowArea> calculateBuildingShadows(
+    public List<ShadowArea> calculateBuildingShadows(
             double startLat, double startLng, double endLat, double endLng, SunPosition sunPos) {
 
         try {
@@ -1335,7 +1335,7 @@ public class ShadowRouteService {
     /**
      * 기본 T맵 경로 파싱
      */
-    private Route parseBasicRoute(String tmapRouteJson) {
+    public Route parseBasicRoute(String tmapRouteJson) {
         Route route = new Route();
         List<RoutePoint> points = new ArrayList<>();
 

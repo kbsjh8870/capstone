@@ -38,6 +38,12 @@ public class Route {
     @JsonProperty("shadowAreas")
     private List<ShadowArea> shadowAreas = new ArrayList<>();
 
+    @JsonProperty("routeType")
+    private String routeType = ""; // 경로 타입 ("shortest", "waypoint_1" 등)
+
+    @JsonProperty("waypointCount")
+    private int waypointCount = 0; // 경유지 개수
+
     /**
      * 경로의 그림자 비율 계산
      */
@@ -89,5 +95,21 @@ public class Route {
                 * Math.sin(lngDistance / 2) * Math.sin(lngDistance / 2);
         double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         return R * c;
+    }
+
+    public String getRouteType() {
+        return routeType;
+    }
+
+    public void setRouteType(String routeType) {
+        this.routeType = routeType;
+    }
+
+    public int getWaypointCount() {
+        return waypointCount;
+    }
+
+    public void setWaypointCount(int waypointCount) {
+        this.waypointCount = waypointCount;
     }
 }
