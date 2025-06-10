@@ -1191,78 +1191,84 @@ public class ShadowRouteService {
             double startLat, double startLng, double endLat, double endLng, SunPosition sunPos) {
 
         try {
+            logger.info("선택된 시간의 태양 위치 분석:");
+            logger.info("  - 태양 고도: {:.2f}도", sunPos.getAltitude());
+            logger.info("  - 태양 방위각: {:.2f}도", sunPos.getAzimuth());
+
+            // 태양 위치에 따른 그림자 가능성 판단
             if (sunPos.getAltitude() < -10) {
-                logger.debug("태양 고도가 너무 낮음 ({}도). 그림자 계산 제외", sunPos.getAltitude());
+                logger.info("  - 태양이 지평선 아래 → 그림자 계산 제외");
                 return new ArrayList<>();
+            } else if (sunPos.getAltitude() < 10) {
+                logger.info("  - 낮은 태양 고도 → 매우 긴 그림자 생성");
+            } else if (sunPos.getAltitude() > 60) {
+                logger.info("  - 높은 태양 고도 → 짧은 그림자 생성");
+            } else {
+                logger.info("  - 중간 태양 고도 → 적당한 그림자 생성");
             }
 
             double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
 
-            //  그림자 길이 계산 - 더 현실적으로
+            // 그림자 길이 계산 - 더 현실적으로
             double shadowLength;
             if (sunPos.getAltitude() <= 5) {
                 shadowLength = 1000; // 저녁 시간에는 매우 긴 그림자
+                logger.info("  - 그림자 길이: {}m (매우 긴 그림자)", shadowLength);
             } else {
-                // tan 값이 매우 작을 때 보정
                 double tanValue = Math.tan(Math.toRadians(sunPos.getAltitude()));
                 shadowLength = Math.min(2000, Math.max(50, 100 / tanValue));
+                logger.info("  - 그림자 길이: {:.1f}m (계산된 길이)", shadowLength);
             }
 
-            logger.debug("개선된 그림자 계산: 태양고도={}도, 방위각={}도, 그림자방향={}도, 그림자길이={}m",
-                    sunPos.getAltitude(), sunPos.getAzimuth(), shadowDirection, shadowLength);
+            logger.info("  - 그림자 방향: {:.1f}도", shadowDirection);
+            logger.info("건물 그림자 계산 시작...");
 
-            //  완전히 개선된 PostGIS 쿼리
+            // 기존 SQL 쿼리 실행
             String sql = """
-            WITH route_area AS (
-                SELECT ST_Buffer(
-                    ST_MakeLine(
-                        ST_SetSRID(ST_MakePoint(?, ?), 4326),
-                        ST_SetSRID(ST_MakePoint(?, ?), 4326)
-                    ), 0.008  -- 더 넓은 버퍼 (약 900m)
-                ) as geom
-            ),
-            enhanced_building_shadows AS (
-                SELECT 
-                    b.id,
-                    b."A16" as height,
-                    ST_AsGeoJSON(b.geom) as building_geom,
-                    --  다중 그림자 영역 생성 (건물 높이에 따라)
-                    ST_AsGeoJSON(
-                        ST_Union(ARRAY[
-                            -- 기본 건물 영역
+        WITH route_area AS (
+            SELECT ST_Buffer(
+                ST_MakeLine(
+                    ST_SetSRID(ST_MakePoint(?, ?), 4326),
+                    ST_SetSRID(ST_MakePoint(?, ?), 4326)
+                ), 0.008
+            ) as geom
+        ),
+        enhanced_building_shadows AS (
+            SELECT 
+                b.id,
+                b."A16" as height,
+                ST_AsGeoJSON(b.geom) as building_geom,
+                ST_AsGeoJSON(
+                    ST_Union(ARRAY[
+                        b.geom,
+                        ST_Translate(
                             b.geom,
-                            -- 50% 그림자
-                            ST_Translate(
-                                b.geom,
-                                (? * 0.5) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
-                                (? * 0.5) * sin(radians(?)) / 110540.0
-                            ),
-                            -- 100% 그림자  
-                            ST_Translate(
-                                b.geom,
-                                ? * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
-                                ? * sin(radians(?)) / 110540.0
-                            ),
-                            -- 🆕 건물 높이 고려한 추가 그림자 (높은 건물은 더 긴 그림자)
-                            ST_Translate(
-                                b.geom,
-                                (? * (b."A16" / 50.0)) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
-                                (? * (b."A16" / 50.0)) * sin(radians(?)) / 110540.0
-                            )
-                        ])
-                    ) as shadow_geom
-                FROM public."AL_D010_26_20250304" b, route_area r
-                WHERE ST_Intersects(b.geom, r.geom)
-                  AND b."A16" > 2  -- 2m 이상 모든 건물
-                ORDER BY 
-                    --  경로와 가까운 건물 우선, 높은 건물 우선
-                    ST_Distance(b.geom, r.geom) ASC,
-                    b."A16" DESC
-                LIMIT 100  -- 더 많은 건물 포함
-            )
-            SELECT id, height, building_geom, shadow_geom
-            FROM enhanced_building_shadows
-            """;
+                            (? * 0.5) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                            (? * 0.5) * sin(radians(?)) / 110540.0
+                        ),
+                        ST_Translate(
+                            b.geom,
+                            ? * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                            ? * sin(radians(?)) / 110540.0
+                        ),
+                        ST_Translate(
+                            b.geom,
+                            (? * (b."A16" / 50.0)) * cos(radians(?)) / (111320.0 * cos(radians(ST_Y(ST_Centroid(b.geom))))),
+                            (? * (b."A16" / 50.0)) * sin(radians(?)) / 110540.0
+                        )
+                    ])
+                ) as shadow_geom
+            FROM public."AL_D010_26_20250304" b, route_area r
+            WHERE ST_Intersects(b.geom, r.geom)
+              AND b."A16" > 2
+            ORDER BY 
+                ST_Distance(b.geom, r.geom) ASC,
+                b."A16" DESC
+            LIMIT 100
+        )
+        SELECT id, height, building_geom, shadow_geom
+        FROM enhanced_building_shadows
+        """;
 
             List<Map<String, Object>> results = jdbcTemplate.queryForList(sql,
                     startLng, startLat, endLng, endLat,  // route_area
@@ -1283,16 +1289,19 @@ public class ShadowRouteService {
                 shadowAreas.add(area);
             }
 
-            logger.info("개선된 그림자 계산 완료: {}개 건물, 그림자길이={}m",
-                    shadowAreas.size(), shadowLength);
+            logger.info("건물 그림자 계산 완료:");
+            logger.info("  - 분석된 건물 수: {}개", shadowAreas.size());
+            logger.info("  - 적용된 그림자 길이: {:.1f}m", shadowLength);
+            logger.info("  - 그림자 방향: {:.1f}도", shadowDirection);
 
             return shadowAreas;
 
         } catch (Exception e) {
-            logger.error("개선된 그림자 계산 오류: " + e.getMessage(), e);
+            logger.error("태양 위치 기반 그림자 계산 오류: " + e.getMessage(), e);
             return new ArrayList<>();
         }
     }
+
 
     /**
      * 그림자 영역들을 하나의 GeoJSON으로 병합

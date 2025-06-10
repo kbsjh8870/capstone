@@ -30,15 +30,13 @@ public class WeatherService {
      */
     public boolean isBadWeather(double lat, double lng) {
         try {
-            // API 키가 없으면 false 반환 (기본 동작)
             if (weatherApiKey == null || weatherApiKey.trim().isEmpty()) {
-                logger.debug("날씨 API 키가 설정되지 않았습니다. 기본값 false 반환");
+                logger.debug("날씨 API 키가 설정되지 않음 → 기본값(좋은 날씨) 사용");
                 return false;
             }
 
             logger.debug("날씨 정보 조회 시작: 위치=({}, {})", lat, lng);
 
-            // OpenWeatherMap API 호출
             String url = String.format(
                     "https://api.openweathermap.org/data/2.5/weather?lat=%f&lon=%f&appid=%s&units=metric",
                     lat, lng, weatherApiKey);
@@ -47,15 +45,20 @@ public class WeatherService {
 
             if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
                 JsonNode weatherData = objectMapper.readTree(response.getBody());
-                return analyzeWeatherData(weatherData);
+                boolean isBad = analyzeWeatherData(weatherData);
+
+                logger.info(" 날씨 분석 결과: {} → {}",
+                        getWeatherDescription(lat, lng),
+                        isBad ? "나쁜 날씨 (최단경로 권장)" : "좋은 날씨 (다양한 경로 제공)");
+
+                return isBad;
             } else {
                 logger.warn("날씨 API 응답 오류: 상태코드={}", response.getStatusCode());
                 return false;
             }
 
         } catch (Exception e) {
-            logger.warn("날씨 정보 조회 실패: " + e.getMessage());
-            // API 오류 시 기본값 false 반환 (그림자 경로 생성 계속 진행)
+            logger.warn(" 날씨 정보 조회 실패: {} → 기본값(좋은 날씨) 사용", e.getMessage());
             return false;
         }
     }
