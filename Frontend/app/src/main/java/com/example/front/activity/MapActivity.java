@@ -1,6 +1,7 @@
 package com.example.front.activity;
 
 import android.Manifest;
+import android.app.AlertDialog;
 import android.app.DatePickerDialog;
 import android.app.TimePickerDialog;
 import android.content.Context;
@@ -25,6 +26,8 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.example.front.R;
 import com.example.front.adapter.POIAdapter;
+import com.example.front.model.Route;
+import com.example.front.model.RouteCandidate;
 import com.example.front.model.RoutePoint;
 import com.skt.Tmap.*;
 import com.skt.Tmap.poi_item.TMapPOIItem;
@@ -85,6 +88,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     private static final int COLOR_FOLLOW_SHADOW = Color.parseColor("#9C27B0"); // 보라색 - 그림자 따라가기 경로
 
     private boolean isInitialRouteDisplay = true;
+
+    private List<RouteCandidate> routeCandidates = new ArrayList<>();
+    private RouteCandidate selectedCandidate;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -357,9 +363,6 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         // 기존 경로 제거
         clearAllRoutes();
 
-        RadioGroup shadowOptions = findViewById(R.id.radio_group_shadow);
-        shadowOptions.clearCheck();
-
         // 목적지 정보 저장
         destinationPoint = item.getPOIPoint();
         destinationName = item.getPOIName();
@@ -370,15 +373,11 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         // 목적지 마커 추가
         addDestinationMarker();
 
-        isInitialRouteDisplay = true;
-
-        // 현재 위치가 있다면 경로 요청
+        // 현재 위치가 있다면 즉시 후보 경로 요청
         if (currentLocation != null) {
-            requestRoute();
+            requestCandidateRoutes();
         } else {
-            Toast.makeText(this,
-                    "현재 위치를 확인 중입니다. 잠시 후 경로가 표시됩니다.",
-                    Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "현재 위치를 확인 중입니다. 잠시 후 경로가 표시됩니다.", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -518,53 +517,28 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     /**
      * 그림자 정보를 고려한 경로 요청
      */
-    private void requestShadowRoutes() {
-        Log.d(TAG, "그림자 경로 요청 시작: avoidShadow=" + avoidShadow);
-
+    private void requestCandidateRoutes() {
         if (currentLocation == null || destinationPoint == null) {
             Log.e(TAG, "경로 요청 불가: 현재 위치 또는 목적지가 없습니다");
             return;
         }
 
-        // UI 스레드에서 실행되는지 확인
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            progressBar.setVisibility(View.VISIBLE);
-            tvRouteInfo.setVisibility(View.GONE);
-        } else {
-            runOnUiThread(() -> {
-                progressBar.setVisibility(View.VISIBLE);
-                tvRouteInfo.setVisibility(View.GONE);
-            });
-        }
+        progressBar.setVisibility(View.VISIBLE);
+        tvRouteInfo.setVisibility(View.GONE);
 
-        // 하단 버튼 컨테이너 숨기기
-        runOnUiThread(() -> {
-            LinearLayout routeButtonContainer = findViewById(R.id.route_button_container);
-            routeButtonContainer.setVisibility(View.GONE);
-        });
-
-        // 기존에 표시된 경로와 그림자 영역 제거
-        clearAllRoutes();
-
-        // 그림자 경로 API 호출
+        // API 호출
         Thread apiThread = new Thread(() -> {
             try {
-                // 현재 타임스탬프 출력 (API 호출 시점 확인)
-                long timestamp = System.currentTimeMillis();
-                Log.d(TAG, "API 호출 시작 시간: " + timestamp);
-
-                // API 호출 URL 구성
                 String url = String.format(
-                        "%s/api/routes/shadow?startLat=%f&startLng=%f&endLat=%f&endLng=%f&avoidShadow=%b&dateTime=%s",
+                        "%s/api/routes/candidate-routes?startLat=%f&startLng=%f&endLat=%f&endLng=%f&dateTime=%s",
                         SERVER_URL,
                         currentLocation.getLatitude(),
                         currentLocation.getLongitude(),
                         destinationPoint.getLatitude(),
                         destinationPoint.getLongitude(),
-                        avoidShadow,
-                        URLEncoder.encode(selectedDateTime.toString(), "UTF-8"));
+                        URLEncoder.encode(LocalDateTime.now().toString(), "UTF-8"));
 
-                Log.d(TAG, "그림자 경로 요청 URL: " + url);
+                Log.d(TAG, "후보 경로 요청 URL: " + url);
 
                 HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
                 conn.setRequestMethod("GET");
@@ -572,7 +546,6 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 conn.setReadTimeout(30000);
 
                 int responseCode = conn.getResponseCode();
-                Log.d(TAG, "API 응답 코드: " + responseCode);
 
                 if (responseCode != 200) {
                     throw new IOException("서버 응답 오류: " + responseCode);
@@ -588,38 +561,200 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                     response.append(line);
                 }
 
-                Log.d(TAG, "API 응답 길이: " + response.length() + " bytes");
+                JSONObject responseJson = new JSONObject(response.toString());
+                JSONArray candidatesArray = responseJson.getJSONArray("candidates");
 
-                JSONArray routesArray = new JSONArray(response.toString());
-                Log.d(TAG, "경로 개수: " + routesArray.length());
-
-                // UI 업데이트는 메인 스레드에서 수행
                 runOnUiThread(() -> {
                     progressBar.setVisibility(View.GONE);
-
                     try {
-                        displayShadowRoutes(routesArray);
+                        parseCandidatesAndShowDialog(candidatesArray);
                     } catch (Exception e) {
-                        Log.e(TAG, "경로 표시 오류: " + e.getMessage(), e);
-                        Toast.makeText(MapActivity.this,
-                                "경로 표시 중 오류가 발생했습니다: " + e.getMessage(),
-                                Toast.LENGTH_SHORT).show();
+                        Log.e(TAG, "후보 경로 표시 오류: " + e.getMessage(), e);
+                        Toast.makeText(MapActivity.this, "경로 표시 중 오류가 발생했습니다", Toast.LENGTH_SHORT).show();
                     }
                 });
 
             } catch (Exception e) {
-                Log.e(TAG, "그림자 경로 요청 오류: " + e.getMessage(), e);
+                Log.e(TAG, "후보 경로 요청 오류: " + e.getMessage(), e);
                 runOnUiThread(() -> {
                     progressBar.setVisibility(View.GONE);
-                    Toast.makeText(MapActivity.this,
-                            "그림자 경로 요청 중 오류가 발생했습니다: " + e.getMessage(),
-                            Toast.LENGTH_SHORT).show();
+                    Toast.makeText(MapActivity.this, "경로 요청 중 오류가 발생했습니다: " + e.getMessage(), Toast.LENGTH_SHORT).show();
                 });
             }
         });
 
-        // API 호출 스레드 시작
         apiThread.start();
+    }
+
+    /**
+     * 후보 경로 파싱 및 선택 다이얼로그 표시
+     */
+    private void parseCandidatesAndShowDialog(JSONArray candidatesArray) throws JSONException {
+        routeCandidates.clear();
+
+        for (int i = 0; i < candidatesArray.length(); i++) {
+            JSONObject candidateJson = candidatesArray.getJSONObject(i);
+            RouteCandidate candidate = RouteCandidate.fromJson(candidateJson);
+            routeCandidates.add(candidate);
+        }
+
+        Log.d(TAG, "파싱된 후보 경로: " + routeCandidates.size() + "개");
+
+        // 우선순위 순으로 정렬
+        routeCandidates.sort((c1, c2) -> Integer.compare(c1.getPriority(), c2.getPriority()));
+
+        // 선택 다이얼로그 표시
+        showRouteSelectionDialog();
+    }
+
+
+    /**
+     * 경로 선택 다이얼로그 표시
+     */
+    private void showRouteSelectionDialog() {
+        if (routeCandidates.isEmpty()) {
+            Toast.makeText(this, "이용 가능한 경로가 없습니다", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("🗺️ 경로를 선택하세요");
+
+        // 다이얼로그 옵션 생성
+        String[] options = new String[routeCandidates.size()];
+        for (int i = 0; i < routeCandidates.size(); i++) {
+            RouteCandidate candidate = routeCandidates.get(i);
+            options[i] = candidate.getIcon() + " " + candidate.getDisplayName() + "\n" +
+                    candidate.getDescription();
+        }
+
+        builder.setItems(options, (dialog, which) -> {
+            selectedCandidate = routeCandidates.get(which);
+            Log.d(TAG, "선택된 경로: " + selectedCandidate.getDisplayName());
+            displaySelectedRoute(selectedCandidate);
+        });
+
+        // 취소 버튼
+        builder.setNegativeButton("취소", (dialog, which) -> {
+            Log.d(TAG, "경로 선택 취소됨");
+        });
+
+        // 다이얼로그 스타일링
+        AlertDialog dialog = builder.create();
+        dialog.show();
+    }
+
+    /**
+     * 선택된 경로 표시
+     */
+    private void displaySelectedRoute(RouteCandidate candidate) {
+        try {
+            // 기존 경로 제거
+            clearAllRoutes();
+
+            Route route = candidate.getRoute();
+            if (route == null || route.getPoints().isEmpty()) {
+                Toast.makeText(this, "경로 데이터가 없습니다", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            // 경로 폴리라인 생성
+            TMapPolyLine polyLine = new TMapPolyLine();
+            polyLine.setID("selected_route");
+
+            // 타입별 색상 설정
+            int color = Color.parseColor(candidate.getColor());
+            polyLine.setLineColor(color);
+            polyLine.setLineWidth(6.0f);
+
+            // 경로 포인트 추가
+            List<TMapPoint> allPoints = new ArrayList<>();
+            for (RoutePoint point : route.getPoints()) {
+                TMapPoint tMapPoint = new TMapPoint(point.getLat(), point.getLng());
+                polyLine.addLinePoint(tMapPoint);
+                allPoints.add(tMapPoint);
+            }
+
+            // 지도에 경로 추가
+            tMapView.addTMapPolyLine(polyLine.getID(), polyLine);
+            routes.add(polyLine);
+
+            // 그림자 구간 표시
+            displayShadowSegmentsForRoute(route);
+
+            // 경로 정보 표시
+            tvRouteInfo.setText(candidate.getDetailedDescription());
+            tvRouteInfo.setVisibility(View.VISIBLE);
+
+            // 지도 뷰 조정
+            if (!allPoints.isEmpty()) {
+                adjustMapView(allPoints);
+            }
+
+            Log.d(TAG, "경로 표시 완료: " + candidate.getDisplayName());
+
+        } catch (Exception e) {
+            Log.e(TAG, "경로 표시 오류: " + e.getMessage(), e);
+            Toast.makeText(this, "경로 표시 중 오류가 발생했습니다", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * 선택된 경로의 그림자 구간 표시
+     */
+    private void displayShadowSegmentsForRoute(Route route) {
+        try {
+            List<RoutePoint> points = route.getPoints();
+            List<TMapPoint> currentShadowSegment = new ArrayList<>();
+            int segmentCount = 0;
+
+            for (int i = 0; i < points.size(); i++) {
+                RoutePoint point = points.get(i);
+                TMapPoint tMapPoint = new TMapPoint(point.getLat(), point.getLng());
+
+                if (point.isInShadow()) {
+                    currentShadowSegment.add(tMapPoint);
+                } else {
+                    // 그림자 구간 종료
+                    if (currentShadowSegment.size() >= 2) {
+                        createShadowOverlay(currentShadowSegment, segmentCount++);
+                    }
+                    currentShadowSegment.clear();
+                }
+            }
+
+            // 마지막 그림자 구간 처리
+            if (currentShadowSegment.size() >= 2) {
+                createShadowOverlay(currentShadowSegment, segmentCount);
+            }
+
+            // 범례 표시
+            if (segmentCount > 0) {
+                LinearLayout shadowLegend = findViewById(R.id.shadow_legend);
+                shadowLegend.setVisibility(View.VISIBLE);
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG, "그림자 구간 표시 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 그림자 오버레이 생성
+     */
+    private void createShadowOverlay(List<TMapPoint> points, int segmentIndex) {
+        TMapPolyLine shadowOverlay = new TMapPolyLine();
+        shadowOverlay.setID("shadow_segment_" + segmentIndex);
+        shadowOverlay.setLineColor(Color.BLACK);
+        shadowOverlay.setLineWidth(12.0f);
+        shadowOverlay.setLineAlpha(200);
+
+        for (TMapPoint point : points) {
+            shadowOverlay.addLinePoint(point);
+        }
+
+        tMapView.addTMapPolyLine(shadowOverlay.getID(), shadowOverlay);
+        shadowSegments.add(shadowOverlay);
     }
 
     /**
@@ -1161,7 +1296,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
                     // 경로가 설정된 상태라면 재계산
                     if (currentLocation != null && destinationPoint != null) {
-                        requestShadowRoutes();
+                        requestCandidateRoutes();
                     }
                 });
             });
@@ -1190,7 +1325,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
                     // 즉시 경로 요청 실행 (별도 스레드에서)
                     new Thread(() -> {
-                        requestShadowRoutes();
+                        requestCandidateRoutes();
                     }).start();
                 }
             });
