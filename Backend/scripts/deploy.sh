@@ -47,4 +47,7 @@ fi
 
 DEPLOY_JAR=$DEPLOY_PATH$JAR_NAME
 echo "> DEPLOY_JAR 배포"    >> /home/ubuntu/app/deploy.log
-sudo nohup java -jar $DEPLOY_JAR >> /home/ubuntu/app/deploy.log 2>/home/ubuntu/app/deploy_err.log &
+sudo nohup java -jar $DEPLOY_JAR \
+  --tmap.api.key="vU7PQGq7eR8bMAnPeg6F285MVcSpXW9W7wNV57JZ" \
+  --weather.api.key="a08be68225c2a67d6c20df36c2239922" \
+  >> /home/ubuntu/app/deploy.log 2>/home/ubuntu/app/deploy_err.log &
