@@ -116,4 +116,36 @@ public class Route {
 
         return jsonArray;
     }
+
+    public static Route fromJson(JSONObject json) throws JSONException {
+        Route route = new Route();
+        route.setId(json.optLong("id", 0));
+        route.setDistance(json.optDouble("distance", 0.0));
+        route.setDuration(json.optInt("duration", 0));
+        route.setBasicRoute(json.optBoolean("basicRoute", false));
+        route.setAvoidShadow(json.optBoolean("avoidShadow", true));
+        route.setShadowPercentage(json.optInt("shadowPercentage", 0));
+        route.setRouteType(json.optString("routeType", ""));
+        route.setWaypointCount(json.optInt("waypointCount", 0));
+
+        // Points 파싱
+        if (json.has("points")) {
+            JSONArray pointsArray = json.getJSONArray("points");
+            List<RoutePoint> points = new ArrayList<>();
+
+            for (int i = 0; i < pointsArray.length(); i++) {
+                JSONObject pointJson = pointsArray.getJSONObject(i);
+                RoutePoint point = new RoutePoint(
+                        pointJson.getDouble("lat"),
+                        pointJson.getDouble("lng"),
+                        pointJson.optBoolean("inShadow", false)
+                );
+                points.add(point);
+            }
+            route.setPoints(points);
+        }
+
+        return route;
+    }
+
 }
