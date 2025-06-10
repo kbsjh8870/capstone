@@ -33,7 +33,7 @@ public class RouteCandidateService {
 
     private boolean isNightTime(LocalDateTime dateTime) {
         int hour = dateTime.getHour();
-        return hour < 6 || hour >= 18;
+        return hour < 6 || hour >= 22;
     }
 
     /**
@@ -44,38 +44,44 @@ public class RouteCandidateService {
 
         try {
             logger.info("=== 경로 후보 생성 시작 ===");
-            logger.info("출발: ({}, {}), 도착: ({}, {}), 시간: {}", startLat, startLng, endLat, endLng, dateTime);
+            logger.info("출발: ({}, {}), 도착: ({}, {}), 사용자 선택 시간: {}",
+                    startLat, startLng, endLat, endLng, dateTime);
 
-            // 1. 조건 확인
+            // 1. 사용자가 선택한 시간 기준으로 조건 확인
             boolean isNight = isNightTime(dateTime);
             boolean isBadWeather = weatherService.isBadWeather(startLat, startLng);
 
-            logger.info("밤 시간: {}, 나쁜 날씨: {}", isNight, isBadWeather);
+            logger.info("시간 분석 - 선택시간: {}, 밤시간: {}, 나쁜날씨: {}",
+                    dateTime.getHour() + "시", isNight, isBadWeather);
 
-            // 2. 밤이거나 날씨가 나쁘면 최단경로만 3개 반환
+            // 2. 밤이거나 날씨가 나쁘면 안전한 최단경로만 제공
             if (isNight || isBadWeather) {
+                String reason = isNight ? "밤 시간 (22시~6시)" : "나쁜 날씨";
+                logger.info("{}로 인해 안전한 최단경로만 생성", reason);
                 return generateShortestRouteOnly(startLat, startLng, endLat, endLng, dateTime);
             }
 
-            // 3. 다중 경로 생성
+            // 3. 낮 시간 + 좋은 날씨 = 다양한 경로 생성
+            logger.info("낮 시간 + 좋은 날씨 → 다양한 경로 생성 (선택시간: {}시)", dateTime.getHour());
+
+            // 다중 경로 생성
             List<Route> allRoutes = generateMultipleRoutes(startLat, startLng, endLat, endLng);
 
-            // 4. 중복 제거
+            // 중복 제거
             List<Route> uniqueRoutes = removeDuplicateRoutes(allRoutes);
             logger.info("중복 제거 후 경로 수: {}", uniqueRoutes.size());
 
-            // 5. 그늘 점수 계산
+            // 사용자가 선택한 시간의 태양 위치로 그림자 점수 계산
             calculateShadowScores(uniqueRoutes, startLat, startLng, dateTime);
 
-            // 6. 3개 후보 선정
+            // 3개 후보 선정
             List<RouteCandidate> candidates = selectTopThreeCandidates(uniqueRoutes);
 
-            logger.info("최종 후보 경로 3개 생성 완료");
+            logger.info("최종 후보 경로 3개 생성 완료 (선택시간 {}시 기준)", dateTime.getHour());
             return candidates;
 
         } catch (Exception e) {
             logger.error("경로 후보 생성 오류: " + e.getMessage(), e);
-            // 오류 시 기본 최단경로 반환
             return generateShortestRouteOnly(startLat, startLng, endLat, endLng, dateTime);
         }
     }
