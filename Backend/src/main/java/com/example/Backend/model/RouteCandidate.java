@@ -97,7 +97,7 @@ public class RouteCandidate {
     }
 
     /**
-     * 상세 정보 포함한 설명 생성
+     * 상세 정보 포함한 설명 생성 (최단경로 비교 효율성 포함)
      */
     @JsonProperty("detailedDescription")
     public String getDetailedDescription() {
@@ -107,14 +107,59 @@ public class RouteCandidate {
 
         StringBuilder sb = new StringBuilder();
         sb.append(displayName).append("\n");
-        sb.append(description).append("\n");
-
-        // 추가 정보
-        if (route.getWaypointCount() > 0) {
-            sb.append("경유지 ").append(route.getWaypointCount()).append("개");
-        }
+        sb.append(description);
 
         return sb.toString();
+    }
+
+    /**
+     * 최단경로 대비 효율성 계산 (백엔드에서 전달받을 최단경로 정보 필요)
+     */
+    public String calculateEfficiencyDisplay(Route shortestRoute) {
+        if (route == null || shortestRoute == null) {
+            return "효율성 정보 없음";
+        }
+
+        // 거리 비교
+        double distanceRatio = route.getDistance() / shortestRoute.getDistance();
+        String distanceInfo;
+        if (distanceRatio <= 1.05) {
+            distanceInfo = "거리유사";
+        } else if (distanceRatio <= 1.2) {
+            distanceInfo = String.format("+%.0f%%", (distanceRatio - 1) * 100);
+        } else {
+            distanceInfo = String.format("+%.0f%%", (distanceRatio - 1) * 100);
+        }
+
+        // 그늘 비교
+        int shadowDiff = route.getShadowPercentage() - shortestRoute.getShadowPercentage();
+        String shadowInfo;
+        if (Math.abs(shadowDiff) <= 2) {
+            shadowInfo = "그늘비슷";
+        } else if (shadowDiff > 0) {
+            shadowInfo = String.format("그늘+%d%%", shadowDiff);
+        } else {
+            shadowInfo = String.format("그늘%d%%", shadowDiff);
+        }
+
+        // 종합 효율성
+        String efficiency;
+        if ("shortest".equals(type)) {
+            efficiency = "기준경로";
+        } else {
+            // 거리 증가 대비 그늘 효과 평가
+            if (distanceRatio <= 1.1 && shadowDiff >= 10) {
+                efficiency = "고효율";
+            } else if (distanceRatio <= 1.3 && shadowDiff >= 5) {
+                efficiency = "중효율";
+            } else if (distanceRatio > 1.5) {
+                efficiency = "저효율";
+            } else {
+                efficiency = "보통";
+            }
+        }
+
+        return String.format("%s · %s · %s", distanceInfo, shadowInfo, efficiency);
     }
 
     /**
@@ -132,5 +177,18 @@ public class RouteCandidate {
             default:
                 return 99;
         }
+    }
+
+    // Setter 메서드들 추가
+    public void setDescription(String description) {
+        this.description = description;
+    }
+
+    public void setScore(double score) {
+        this.score = score;
+    }
+
+    public void setColor(String color) {
+        this.color = color;
     }
 }
