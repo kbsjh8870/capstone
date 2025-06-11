@@ -213,16 +213,14 @@ public class RouteCandidateService {
                 logger.info("O 최단경로 후보: {}km, {}분",
                         shortestRoute.getDistance() / 1000.0, shortestRoute.getDuration());
             } else {
-                // 최단경로 생성 불가
-                RouteCandidate unavailableShortest = createUnavailableCandidate("shortest", "최단경로", "경로 생성 실패");
-                candidates.add(unavailableShortest);
-                logger.info("X 최단경로 생성 불가");
+
+                logger.info("X 최단경로 생성 불가 - 후보에서 제외");
             }
 
             // 2. 그림자 많은 경로 후보
             Route shadeRoute = findRouteByType(routes, "shade");
             if (shadeRoute != null && shortestRoute != null) {
-                // 품질 검증
+
                 String failureReason = validateRouteQuality(shadeRoute, shortestRoute, "shade");
                 if (failureReason == null) {
                     RouteCandidate shade = new RouteCandidate("shade", "그늘이 많은경로", shadeRoute);
@@ -230,22 +228,19 @@ public class RouteCandidateService {
                     logger.info("O 그림자 경로 후보: {}km, {}분, 그늘 {}%",
                             shadeRoute.getDistance() / 1000.0, shadeRoute.getDuration(), shadeRoute.getShadowPercentage());
                 } else {
-                    RouteCandidate unavailableShade = createUnavailableCandidate("shade", "그늘이 많은경로", failureReason);
-                    candidates.add(unavailableShade);
-                    logger.info("X 그림자 경로 품질 검증 실패: {}", failureReason);
+
+                    logger.info("X 그림자 경로 품질 검증 실패: {} - 후보에서 제외", failureReason);
                 }
             } else {
                 String reason = shortestRoute == null ? "기준 경로 없음" : "그림자 정보 부족";
-                RouteCandidate unavailableShade = createUnavailableCandidate("shade", "그늘이 많은경로", reason);
-                candidates.add(unavailableShade);
-                logger.info("X 그림자 경로 생성 불가: {}", reason);
-            }
 
+                logger.info("X 그림자 경로 생성 불가: {} - 후보에서 제외", reason);
+            }
 
             // 3. 균형 경로 후보
             Route balancedRoute = findRouteByType(routes, "balanced");
             if (balancedRoute != null && shortestRoute != null) {
-                // 품질 검증
+
                 String failureReason = validateRouteQuality(balancedRoute, shortestRoute, "balanced");
                 if (failureReason == null) {
                     RouteCandidate balanced = new RouteCandidate("balanced", "균형경로", balancedRoute);
@@ -253,31 +248,28 @@ public class RouteCandidateService {
                     logger.info("O 균형 경로 후보: {}km, {}분, 그늘 {}%",
                             balancedRoute.getDistance() / 1000.0, balancedRoute.getDuration(), balancedRoute.getShadowPercentage());
                 } else {
-                    RouteCandidate unavailableBalanced = createUnavailableCandidate("balanced", "균형경로", failureReason);
-                    candidates.add(unavailableBalanced);
-                    logger.info("X 균형 경로 품질 검증 실패: {}", failureReason);
+
+                    logger.info("X 균형 경로 품질 검증 실패: {} - 후보에서 제외", failureReason);
                 }
             } else {
                 String reason = shortestRoute == null ? "기준 경로 없음" : "경유지 생성 실패";
-                RouteCandidate unavailableBalanced = createUnavailableCandidate("balanced", "균형경로", reason);
-                candidates.add(unavailableBalanced);
-                logger.info("X 균형 경로 생성 불가: {}", reason);
+
+                logger.info("X 균형 경로 생성 불가: {} - 후보에서 제외", reason);
             }
 
-            logger.info("타입별 후보 생성 완료: {}개 (항상 3개 보장)", candidates.size());
+            logger.info("타입별 후보 생성 완료: {}개 (유효한 경로만)", candidates.size());
 
         } catch (Exception e) {
             logger.error("타입별 후보 생성 오류: " + e.getMessage(), e);
 
-            // 오류 시 3개 모두 생성 불가로 설정
+
             candidates.clear();
-            candidates.add(createUnavailableCandidate("shortest", "최단경로", "시스템 오류"));
-            candidates.add(createUnavailableCandidate("shade", "그늘이 많은경로", "시스템 오류"));
-            candidates.add(createUnavailableCandidate("balanced", "균형경로", "시스템 오류"));
+            logger.info("시스템 오류로 인해 모든 후보 제외");
         }
 
         return candidates;
     }
+
 
     /**
      * 경로 품질 검증
