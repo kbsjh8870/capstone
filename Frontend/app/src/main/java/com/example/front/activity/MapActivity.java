@@ -599,19 +599,36 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
         for (int i = 0; i < candidatesArray.length(); i++) {
             JSONObject candidateJson = candidatesArray.getJSONObject(i);
-            RouteCandidate candidate = RouteCandidate.fromJson(candidateJson);
-            routeCandidates.add(candidate);
+
+            try {
+                RouteCandidate candidate = RouteCandidate.fromJson(candidateJson);
+
+                if (candidate.getRoute() != null &&
+                        candidate.getRoute().getPoints() != null &&
+                        !candidate.getRoute().getPoints().isEmpty()) {
+
+                    routeCandidates.add(candidate);
+                    Log.d(TAG, "유효한 후보 " + i + ": " + candidate.getDisplayName());
+                } else {
+                    Log.d(TAG, "무효한 후보 " + i + " 제외: " + candidate.getDisplayName());
+                }
+
+            } catch (Exception e) {
+                Log.e(TAG, "후보 " + i + " 파싱 실패: " + e.getMessage(), e);
+            }
         }
 
-        Log.d(TAG, "파싱된 후보 경로: " + routeCandidates.size() + "개");
+        Log.d(TAG, "파싱된 유효 후보 경로: " + routeCandidates.size() + "개");
 
-        // 우선순위 순으로 정렬
+        if (routeCandidates.isEmpty()) {
+            Toast.makeText(this, "생성 가능한 경로가 없습니다", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // 기존 정렬 로직 그대로
         routeCandidates.sort((c1, c2) -> Integer.compare(c1.getPriority(), c2.getPriority()));
-
-        // 선택 다이얼로그 표시
         showRouteSelectionDialog();
     }
-
 
     /**
      * 경로 선택 다이얼로그 표시
@@ -625,26 +642,26 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle("🗺️ 경로를 선택하세요");
 
-        // 다이얼로그 옵션 생성
         String[] options = new String[routeCandidates.size()];
         for (int i = 0; i < routeCandidates.size(); i++) {
             RouteCandidate candidate = routeCandidates.get(i);
+
             options[i] = candidate.getIcon() + " " + candidate.getDisplayName() + "\n" +
                     candidate.getDescription();
         }
 
         builder.setItems(options, (dialog, which) -> {
-            selectedCandidate = routeCandidates.get(which);
+            RouteCandidate selectedCandidate = routeCandidates.get(which);
+
+            this.selectedCandidate = selectedCandidate;
             Log.d(TAG, "선택된 경로: " + selectedCandidate.getDisplayName());
             displaySelectedRoute(selectedCandidate);
         });
 
-        // 취소 버튼
         builder.setNegativeButton("취소", (dialog, which) -> {
             Log.d(TAG, "경로 선택 취소됨");
         });
 
-        // 다이얼로그 스타일링
         AlertDialog dialog = builder.create();
         dialog.show();
     }
@@ -663,16 +680,13 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 return;
             }
 
-            // 경로 폴리라인 생성
             TMapPolyLine polyLine = new TMapPolyLine();
             polyLine.setID("selected_route");
 
-            // 타입별 색상 설정
             int color = Color.parseColor(candidate.getColor());
             polyLine.setLineColor(color);
             polyLine.setLineWidth(6.0f);
 
-            // 경로 포인트 추가
             List<TMapPoint> allPoints = new ArrayList<>();
             for (RoutePoint point : route.getPoints()) {
                 TMapPoint tMapPoint = new TMapPoint(point.getLat(), point.getLng());
@@ -680,18 +694,14 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 allPoints.add(tMapPoint);
             }
 
-            // 지도에 경로 추가
             tMapView.addTMapPolyLine(polyLine.getID(), polyLine);
             routes.add(polyLine);
 
-            // 그림자 구간 표시
             displayShadowSegmentsForRoute(route);
 
-            // 경로 정보 표시
             tvRouteInfo.setText(candidate.getDetailedDescription());
             tvRouteInfo.setVisibility(View.VISIBLE);
 
-            // 지도 뷰 조정
             if (!allPoints.isEmpty()) {
                 adjustMapView(allPoints);
             }
