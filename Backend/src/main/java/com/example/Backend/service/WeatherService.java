@@ -29,7 +29,12 @@ public class WeatherService {
      * 날씨가 나쁜지 확인 (흐림, 비, 이슬비 등)
      */
     public boolean isBadWeather(double lat, double lng) {
-        try {
+
+        //  임시 디버깅용 항상 좋은 날씨로 반환
+        logger.info("테스트용 - 날씨 무시");
+        return false;
+
+       /* try {
 
             logger.info("🔧 DEBUG - weatherApiKey 값: '{}'", weatherApiKey);
             logger.info("🔧 DEBUG - weatherApiKey 길이: {}", weatherApiKey != null ? weatherApiKey.length() : "null");
@@ -65,7 +70,7 @@ public class WeatherService {
         } catch (Exception e) {
             logger.warn(" 날씨 정보 조회 실패: {} → 기본값(좋은 날씨) 사용", e.getMessage());
             return false;
-        }
+        }*/
     }
 
     /**
