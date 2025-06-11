@@ -539,24 +539,180 @@ public class ShadowRouteService {
      * 경로 품질 검증
      */
     private boolean isRouteQualityAcceptable(Route baseRoute, Route shadowRoute) {
-        // 거리 차이가 기본 경로의 25% 이내인지 확인
-        double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
+        try {
+            logger.debug("=== 경로 품질 검증 시작 ===");
 
-        if (distanceRatio > 1.18) {
-            logger.debug("경로가 너무 멀어짐: 기본={}m, 그림자={}m ({}% 증가)",
-                    (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
-                    (int)((distanceRatio - 1) * 100));
+            // 1. 거리 비율 검증 (150% 이하로 제한 강화)
+            double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
+            if (distanceRatio > 1.5) {
+                logger.debug("❌ 거리 초과: 기본={}m, 생성={}m ({}% 증가, 허용: 150%)",
+                        (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
+                        (int)((distanceRatio - 1) * 100));
+                return false;
+            }
+
+            // 2. 포인트 수 합리성 검증
+            if (shadowRoute.getPoints().size() < baseRoute.getPoints().size() * 0.5) {
+                logger.debug("X 경로 포인트 수 부족: 기본={}개, 생성={}개",
+                        baseRoute.getPoints().size(), shadowRoute.getPoints().size());
+                return false;
+            }
+
+            // 3. 경로 연속성 검증
+            if (!isRouteContinuous(shadowRoute)) {
+                logger.debug("X 경로 연속성 검증 실패");
+                return false;
+            }
+
+            // 4. 목적지 근접성 검증
+            if (!isDestinationReachable(shadowRoute)) {
+                logger.debug("X 목적지 근접성 검증 실패");
+                return false;
+            }
+
+            // 5. 역방향 이동 검증
+            if (!isProgressiveRoute(shadowRoute)) {
+                logger.debug("X 역방향 이동 감지");
+                return false;
+            }
+
+            logger.debug("✅ 경로 품질 검증 통과: 거리 비율 {}%", (int)((distanceRatio - 1) * 100));
+            return true;
+
+        } catch (Exception e) {
+            logger.error("경로 품질 검증 오류: " + e.getMessage(), e);
             return false;
         }
+    }
 
-        // 포인트 수가 합리적인지 확인 (조건 완화)
-        if (shadowRoute.getPoints().size() < baseRoute.getPoints().size() * 0.3) {
-            logger.debug("경로 포인트가 너무 적음");
-            return false;
+
+    /**
+     * 경로 연속성 검증 (포인트 간 거리가 비정상적으로 크지 않은지 확인)
+     */
+    private boolean isRouteContinuous(Route route) {
+        try {
+            List<RoutePoint> points = route.getPoints();
+            if (points.size() < 2) return true;
+
+            int discontinuousCount = 0;
+            final double MAX_SEGMENT_DISTANCE = 500.0; // 500m 이상 점프는 비정상
+
+            for (int i = 0; i < points.size() - 1; i++) {
+                RoutePoint current = points.get(i);
+                RoutePoint next = points.get(i + 1);
+
+                double segmentDistance = calculateDistance(
+                        current.getLat(), current.getLng(),
+                        next.getLat(), next.getLng()
+                );
+
+                if (segmentDistance > MAX_SEGMENT_DISTANCE) {
+                    discontinuousCount++;
+                    logger.debug("긴 구간 발견: {}m (포인트 {} → {})",
+                            (int)segmentDistance, i, i + 1);
+                }
+            }
+
+            // 전체 구간의 5% 이상이 비정상적으로 길면 실패
+            double discontinuousRatio = (double) discontinuousCount / (points.size() - 1);
+            boolean isContinuous = discontinuousRatio <= 0.05;
+
+            logger.debug("경로 연속성: {}% 비정상 구간 (허용: 5%)", (int)(discontinuousRatio * 100));
+            return isContinuous;
+
+        } catch (Exception e) {
+            logger.error("경로 연속성 검증 오류: " + e.getMessage(), e);
+            return true; // 오류 시 허용
         }
+    }
 
-        logger.debug("경로 품질 검증 통과: 거리 차이 {}%", (int)((distanceRatio - 1) * 100));
-        return true;
+    /**
+     * 목적지 근접성 검증 (마지막 포인트가 목적지 근처에 있는지 확인)
+     */
+    private boolean isDestinationReachable(Route route) {
+        try {
+            List<RoutePoint> points = route.getPoints();
+            if (points.isEmpty()) return false;
+
+            // 경로의 마지막 포인트가 있는지만 확인
+            RoutePoint lastPoint = points.get(points.size() - 1);
+
+            // 좌표가 유효한 범위 내에 있는지 확인
+            if (Math.abs(lastPoint.getLat()) > 90 || Math.abs(lastPoint.getLng()) > 180) {
+                logger.debug("X 마지막 포인트 좌표 무효: ({}, {})",
+                        lastPoint.getLat(), lastPoint.getLng());
+                return false;
+            }
+
+            return true;
+
+        } catch (Exception e) {
+            logger.error("목적지 근접성 검증 오류: " + e.getMessage(), e);
+            return true;
+        }
+    }
+
+    /**
+     * 전진성 검증 강화 (역방향 이동이나 과도한 우회 방지)
+     */
+    private boolean isProgressiveRoute(Route route) {
+        try {
+            List<RoutePoint> points = route.getPoints();
+            if (points.size() < 5) return true;
+
+            RoutePoint start = points.get(0);
+            RoutePoint end = points.get(points.size() - 1);
+
+            // 전체적인 목적지 방향 계산
+            double overallDirection = Math.atan2(
+                    end.getLng() - start.getLng(),
+                    end.getLat() - start.getLat()
+            );
+
+            // 경로 구간들의 방향성 분석
+            int forwardSegments = 0;
+            int backwardSegments = 0;
+            int totalSegments = 0;
+
+            // 10개 포인트마다 샘플링하여 분석
+            int stepSize = Math.max(1, points.size() / 20); // 최대 20개 샘플
+            for (int i = 0; i < points.size() - stepSize; i += stepSize) {
+                RoutePoint current = points.get(i);
+                RoutePoint next = points.get(Math.min(i + stepSize, points.size() - 1));
+
+                double segmentDirection = Math.atan2(
+                        next.getLng() - current.getLng(),
+                        next.getLat() - current.getLat()
+                );
+
+                // 전체 방향과의 각도 차이 계산
+                double angleDiff = Math.abs(segmentDirection - overallDirection);
+                if (angleDiff > Math.PI) {
+                    angleDiff = 2 * Math.PI - angleDiff;
+                }
+
+                if (angleDiff <= Math.PI / 2) { // 90도 이내
+                    forwardSegments++;
+                } else {
+                    backwardSegments++;
+                    logger.debug("--- 역방향 구간 감지: 포인트 {} → {}, 각도차이: {}도",
+                            i, i + stepSize, Math.toDegrees(angleDiff));
+                }
+                totalSegments++;
+            }
+
+            // 75% 이상이 전진 방향이어야 함
+            double forwardRatio = totalSegments > 0 ? (double) forwardSegments / totalSegments : 1.0;
+            boolean isProgressive = forwardRatio >= 0.75;
+
+            logger.debug("경로 전진성: {}% 전진 구간 (기준: 75%)", (int)(forwardRatio * 100));
+
+            return isProgressive;
+
+        } catch (Exception e) {
+            logger.error("전진성 검증 오류: " + e.getMessage(), e);
+            return true;
+        }
     }
 
     /**
@@ -1018,17 +1174,31 @@ public class ShadowRouteService {
             JsonNode rootNode = objectMapper.readTree(tmapRouteJson);
             JsonNode features = rootNode.path("features");
 
+            if (features.isEmpty()) {
+                logger.warn("T맵 응답에 경로 데이터가 없음");
+                return createFallbackRoute();
+            }
+
             double totalDistance = 0;
             int totalDuration = 0;
+            int validSegments = 0;
 
             for (JsonNode feature : features) {
                 JsonNode properties = feature.path("properties");
 
                 if (properties.has("distance")) {
-                    totalDistance += properties.path("distance").asDouble();
+                    double segmentDistance = properties.path("distance").asDouble();
+                    // 비정상적으로 긴 구간 필터링
+                    if (segmentDistance > 0 && segmentDistance < 10000) { // 10km 이하만 허용
+                        totalDistance += segmentDistance;
+                        validSegments++;
+                    }
                 }
                 if (properties.has("time")) {
-                    totalDuration += properties.path("time").asInt();
+                    int segmentTime = properties.path("time").asInt();
+                    if (segmentTime > 0 && segmentTime < 3600) { // 1시간 이하만 허용
+                        totalDuration += segmentTime;
+                    }
                 }
 
                 JsonNode geometry = feature.path("geometry");
@@ -1039,29 +1209,79 @@ public class ShadowRouteService {
                         double lng = coord.get(0).asDouble();
                         double lat = coord.get(1).asDouble();
 
-                        RoutePoint point = new RoutePoint();
-                        point.setLat(lat);
-                        point.setLng(lng);
-                        point.setInShadow(false); // 초기값
-                        points.add(point);
+                        // 좌표 유효성 검증
+                        if (isValidCoordinate(lat, lng)) {
+                            RoutePoint point = new RoutePoint();
+                            point.setLat(lat);
+                            point.setLng(lng);
+                            point.setInShadow(false);
+                            points.add(point);
+                        } else {
+                            logger.warn("️무효한 좌표 제외: ({}, {})", lat, lng);
+                        }
                     }
                 }
             }
 
+            // 최종 검증
+            if (points.size() < 2) {
+                logger.error("X 경로 포인트 부족: {}개", points.size());
+                return createFallbackRoute();
+            }
+
+            if (validSegments == 0) {
+                logger.warn("유효한 경로 구간이 없음");
+                totalDistance = calculateTotalDistanceFromPoints(points);
+            }
+
             route.setPoints(points);
             route.setDistance(totalDistance);
-            route.setDuration(totalDuration / 60);
+            route.setDuration(totalDuration / 60); // 초를 분으로 변환
 
-            logger.debug("T맵 경로 파싱 완료: {}개 포인트, 거리={}m", points.size(), totalDistance);
+            logger.debug("T맵 경로 파싱 성공: {}개 포인트, 거리={}m, 시간={}분",
+                    points.size(), (int)totalDistance, totalDuration / 60);
+
+            return route;
 
         } catch (Exception e) {
-            logger.error("경로 파싱 오류: " + e.getMessage(), e);
-            route.setPoints(new ArrayList<>());
-            route.setDistance(0);
-            route.setDuration(0);
+            logger.error("X T맵 경로 파싱 오류: " + e.getMessage(), e);
+            return createFallbackRoute();
         }
+    }
 
-        return route;
+    /**
+     * 좌표 유효성 검증
+     */
+    private boolean isValidCoordinate(double lat, double lng) {
+        // 한국 영역 대략적 범위로 제한 (+ 여유분)
+        return lat >= 33.0 && lat <= 39.0 && lng >= 124.0 && lng <= 132.0;
+    }
+
+    /**
+     * 포인트 기반 총 거리 계산
+     */
+    private double calculateTotalDistanceFromPoints(List<RoutePoint> points) {
+        double totalDistance = 0;
+        for (int i = 0; i < points.size() - 1; i++) {
+            RoutePoint p1 = points.get(i);
+            RoutePoint p2 = points.get(i + 1);
+            totalDistance += calculateDistance(p1.getLat(), p1.getLng(), p2.getLat(), p2.getLng());
+        }
+        return totalDistance;
+    }
+
+    /**
+     * 대체 경로 생성 (API 실패 시)
+     */
+    private Route createFallbackRoute() {
+        Route fallbackRoute = new Route();
+        fallbackRoute.setPoints(new ArrayList<>());
+        fallbackRoute.setDistance(0);
+        fallbackRoute.setDuration(0);
+        fallbackRoute.setRouteType("fallback");
+
+        logger.info("대체 경로 생성됨");
+        return fallbackRoute;
     }
 
     /**
