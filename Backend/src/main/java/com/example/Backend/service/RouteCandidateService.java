@@ -43,7 +43,7 @@ public class RouteCandidateService {
             double startLat, double startLng, double endLat, double endLng, LocalDateTime dateTime) {
 
         try {
-            logger.info("=== 개선된 경로 후보 생성 시작 ===");
+            logger.info("=== 가능한 경로 후보 생성 시작 ===");
             logger.info("출발: ({}, {}), 도착: ({}, {}), 사용자 선택 시간: {}",
                     startLat, startLng, endLat, endLng, dateTime);
 
@@ -210,66 +210,127 @@ public class RouteCandidateService {
             if (shortestRoute != null) {
                 RouteCandidate shortest = new RouteCandidate("shortest", "최단경로", shortestRoute);
                 candidates.add(shortest);
-                logger.info("최단경로 후보: {}km, {}분",
+                logger.info("O 최단경로 후보: {}km, {}분",
                         shortestRoute.getDistance() / 1000.0, shortestRoute.getDuration());
+            } else {
+                // 최단경로 생성 불가
+                RouteCandidate unavailableShortest = createUnavailableCandidate("shortest", "최단경로", "경로 생성 실패");
+                candidates.add(unavailableShortest);
+                logger.info("X 최단경로 생성 불가");
             }
 
             // 2. 그림자 많은 경로 후보
             Route shadeRoute = findRouteByType(routes, "shade");
-            if (shadeRoute != null) {
-                RouteCandidate shade = new RouteCandidate("shade", "그늘이 많은경로", shadeRoute);
-                candidates.add(shade);
-                logger.info("그림자 경로 후보: {}km, {}분, 그늘 {}%",
-                        shadeRoute.getDistance() / 1000.0, shadeRoute.getDuration(), shadeRoute.getShadowPercentage());
+            if (shadeRoute != null && shortestRoute != null) {
+                // 품질 검증
+                String failureReason = validateRouteQuality(shadeRoute, shortestRoute, "shade");
+                if (failureReason == null) {
+                    RouteCandidate shade = new RouteCandidate("shade", "그늘이 많은경로", shadeRoute);
+                    candidates.add(shade);
+                    logger.info("O 그림자 경로 후보: {}km, {}분, 그늘 {}%",
+                            shadeRoute.getDistance() / 1000.0, shadeRoute.getDuration(), shadeRoute.getShadowPercentage());
+                } else {
+                    RouteCandidate unavailableShade = createUnavailableCandidate("shade", "그늘이 많은경로", failureReason);
+                    candidates.add(unavailableShade);
+                    logger.info("X 그림자 경로 품질 검증 실패: {}", failureReason);
+                }
+            } else {
+                String reason = shortestRoute == null ? "기준 경로 없음" : "그림자 정보 부족";
+                RouteCandidate unavailableShade = createUnavailableCandidate("shade", "그늘이 많은경로", reason);
+                candidates.add(unavailableShade);
+                logger.info("X 그림자 경로 생성 불가: {}", reason);
             }
+
 
             // 3. 균형 경로 후보
             Route balancedRoute = findRouteByType(routes, "balanced");
-            if (balancedRoute != null) {
-                RouteCandidate balanced = new RouteCandidate("balanced", "균형경로", balancedRoute);
-                candidates.add(balanced);
-                logger.info("균형 경로 후보: {}km, {}분, 그늘 {}%",
-                        balancedRoute.getDistance() / 1000.0, balancedRoute.getDuration(), balancedRoute.getShadowPercentage());
-            }
-
-            // 4. 부족한 후보는 변형 경로로 채우기
-            while (candidates.size() < 3 && routes.size() > candidates.size()) {
-                Route alternativeRoute = findAlternativeRouteForCandidates(routes, candidates);
-                if (alternativeRoute != null) {
-                    String candidateType = "alternate" + (candidates.size() + 1);
-                    String displayName = "추천경로 " + (candidates.size() + 1);
-
-                    RouteCandidate alternative = new RouteCandidate(candidateType, displayName, alternativeRoute);
-                    candidates.add(alternative);
-                    logger.info("추가 경로 후보: {} - {}km", displayName, alternativeRoute.getDistance() / 1000.0);
+            if (balancedRoute != null && shortestRoute != null) {
+                // 품질 검증
+                String failureReason = validateRouteQuality(balancedRoute, shortestRoute, "balanced");
+                if (failureReason == null) {
+                    RouteCandidate balanced = new RouteCandidate("balanced", "균형경로", balancedRoute);
+                    candidates.add(balanced);
+                    logger.info("O 균형 경로 후보: {}km, {}분, 그늘 {}%",
+                            balancedRoute.getDistance() / 1000.0, balancedRoute.getDuration(), balancedRoute.getShadowPercentage());
                 } else {
-                    break;
+                    RouteCandidate unavailableBalanced = createUnavailableCandidate("balanced", "균형경로", failureReason);
+                    candidates.add(unavailableBalanced);
+                    logger.info("X 균형 경로 품질 검증 실패: {}", failureReason);
                 }
+            } else {
+                String reason = shortestRoute == null ? "기준 경로 없음" : "경유지 생성 실패";
+                RouteCandidate unavailableBalanced = createUnavailableCandidate("balanced", "균형경로", reason);
+                candidates.add(unavailableBalanced);
+                logger.info("X 균형 경로 생성 불가: {}", reason);
             }
 
-            // 5. 여전히 부족하면 최단경로로 채우기
-            while (candidates.size() < 3 && shortestRoute != null) {
-                String fallbackType = "fallback" + candidates.size();
-                String fallbackName = "안전경로 " + candidates.size();
-
-                RouteCandidate fallback = new RouteCandidate(fallbackType, fallbackName, shortestRoute);
-                candidates.add(fallback);
-                logger.info("폴백 경로 후보: {}", fallbackName);
-            }
-
-            logger.info("타입별 후보 생성 완료: {}개", candidates.size());
+            logger.info("타입별 후보 생성 완료: {}개 (항상 3개 보장)", candidates.size());
 
         } catch (Exception e) {
             logger.error("타입별 후보 생성 오류: " + e.getMessage(), e);
 
-            // 오류 시 최소한의 후보라도 생성
-            if (!routes.isEmpty()) {
-                Route fallbackRoute = routes.get(0);
-                candidates.add(new RouteCandidate("fallback", "기본경로", fallbackRoute));
-            }
+            // 오류 시 3개 모두 생성 불가로 설정
+            candidates.clear();
+            candidates.add(createUnavailableCandidate("shortest", "최단경로", "시스템 오류"));
+            candidates.add(createUnavailableCandidate("shade", "그늘이 많은경로", "시스템 오류"));
+            candidates.add(createUnavailableCandidate("balanced", "균형경로", "시스템 오류"));
         }
 
         return candidates;
+    }
+
+    /**
+     * 경로 품질 검증
+     */
+    private String validateRouteQuality(Route targetRoute, Route baseRoute, String routeType) {
+        try {
+            // 1. 거리 검증
+            double distanceRatio = targetRoute.getDistance() / baseRoute.getDistance();
+            double maxRatio = "shade".equals(routeType) ? 2.0 : 1.5; // 그림자: 200%, 균형: 150%
+
+            if (distanceRatio > maxRatio) {
+                return String.format("우회 거리 과다 (%.0f%% 증가)", (distanceRatio - 1) * 100);
+            }
+
+            // 2. 유사도 검증
+            double similarity = calculateRouteSimilarity(targetRoute, baseRoute);
+            if (similarity > 0.85) {
+                return String.format("경로 차이 미미 (유사도 %.0f%%)", similarity * 100);
+            }
+
+            // 3. 그림자 경로 전용 검증
+            if ("shade".equals(routeType)) {
+                int shadowDiff = Math.abs(targetRoute.getShadowPercentage() - baseRoute.getShadowPercentage());
+                if (shadowDiff < 5) {
+                    return String.format("그늘 효과 미미 (차이 %d%%)", shadowDiff);
+                }
+            }
+
+            // 4. 최소 거리 검증
+            if (targetRoute.getDistance() < 100) {
+                return "경로가 너무 짧음";
+            }
+
+            return null; // 검증 통과
+
+        } catch (Exception e) {
+            return "검증 오류 발생";
+        }
+    }
+
+    /**
+     * 생성 불가 후보 생성
+     */
+    private RouteCandidate createUnavailableCandidate(String type, String displayName, String reason) {
+        RouteCandidate unavailable = new RouteCandidate();
+        unavailable.setType(type);
+        unavailable.setDisplayName(displayName);
+        unavailable.setDescription("생성 불가: " + reason);
+        unavailable.setColor("#CCCCCC"); // 회색
+        unavailable.setRoute(null); // 경로 없음
+        unavailable.setScore(0.0);
+
+        return unavailable;
     }
 
     /**
@@ -281,22 +342,6 @@ public class RouteCandidateService {
                 .findFirst()
                 .orElse(null);
     }
-
-    /**
-     * 후보용 대안 경로 찾기
-     */
-    private Route findAlternativeRouteForCandidates(List<Route> routes, List<RouteCandidate> existingCandidates) {
-        // 이미 사용된 경로들 제외
-        Set<String> usedTypes = existingCandidates.stream()
-                .map(c -> c.getRoute().getRouteType())
-                .collect(Collectors.toSet());
-
-        return routes.stream()
-                .filter(route -> !usedTypes.contains(route.getRouteType()))
-                .findFirst()
-                .orElse(null);
-    }
-
 
     /**
      * 1. 최단경로 생성 (순수 T맵 API, 경유지 없음)
@@ -1124,15 +1169,34 @@ public class RouteCandidateService {
             String routeJson = tmapApiService.getWalkingRoute(startLat, startLng, endLat, endLng);
             Route shortestRoute = shadowRouteService.parseBasicRoute(routeJson);
 
-            RouteCandidate shortest = new RouteCandidate("shortest", "최단경로", shortestRoute);
-            RouteCandidate alternate1 = new RouteCandidate("alternate1", "추천경로", shortestRoute);
-            RouteCandidate alternate2 = new RouteCandidate("alternate2", "안전경로", shortestRoute);
+            List<RouteCandidate> candidates = new ArrayList<>();
 
-            return Arrays.asList(shortest, alternate1, alternate2);
+            if (shortestRoute != null && !shortestRoute.getPoints().isEmpty()) {
+                // 최단경로 성공
+                RouteCandidate shortest = new RouteCandidate("shortest", "최단경로", shortestRoute);
+                candidates.add(shortest);
+            } else {
+                // 최단경로도 실패
+                candidates.add(createUnavailableCandidate("shortest", "최단경로", "경로 생성 실패"));
+            }
+
+            // 나머지는 안전상 생성 불가
+            String safetyReason = "안전상 생성 불가 (밤시간/나쁜날씨)";
+            candidates.add(createUnavailableCandidate("shade", "그늘이 많은경로", safetyReason));
+            candidates.add(createUnavailableCandidate("balanced", "균형경로", safetyReason));
+
+            return candidates;
 
         } catch (Exception e) {
-            logger.error("최단경로 생성 오류: " + e.getMessage(), e);
-            return new ArrayList<>();
+            logger.error("안전 모드 경로 생성 오류: " + e.getMessage(), e);
+
+            // 모든 경로 생성 불가
+            List<RouteCandidate> emergencyCandidates = new ArrayList<>();
+            emergencyCandidates.add(createUnavailableCandidate("shortest", "최단경로", "시스템 오류"));
+            emergencyCandidates.add(createUnavailableCandidate("shade", "그늘이 많은경로", "시스템 오류"));
+            emergencyCandidates.add(createUnavailableCandidate("balanced", "균형경로", "시스템 오류"));
+
+            return emergencyCandidates;
         }
     }
 }
