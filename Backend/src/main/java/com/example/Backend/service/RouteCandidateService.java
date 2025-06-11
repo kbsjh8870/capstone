@@ -210,30 +210,36 @@ public class RouteCandidateService {
             if (shortestRoute != null) {
                 RouteCandidate shortest = new RouteCandidate("shortest", "최단경로", shortestRoute);
                 candidates.add(shortest);
-                logger.info("O 최단경로 후보: {}km, {}분",
-                        shortestRoute.getDistance() / 1000.0, shortestRoute.getDuration());
+                logger.info("O 최단경로 후보: {}km, {}분, 그늘 {}%",
+                        shortestRoute.getDistance() / 1000.0, shortestRoute.getDuration(), shortestRoute.getShadowPercentage());
             } else {
                 logger.info("X 최단경로 생성 불가 - 후보에서 제외");
             }
 
-            // 2. 그림자 많은 경로 후보
+            // 2. 그림자 많은 경로 후보 (품질 검증 강화)
             Route shadeRoute = findRouteByType(routes, "shade");
             if (shadeRoute != null && shortestRoute != null) {
                 String failureReason = validateRouteQuality(shadeRoute, shortestRoute, "shade");
-                if (failureReason == null) {
+                
+                // 그림자 효과 검증 강화
+                int shadowDiff = shadeRoute.getShadowPercentage() - shortestRoute.getShadowPercentage();
+                boolean hasShadeAdvantage = shadowDiff >= 5; // 최소 5% 이상 그늘이 많아야 함
+                
+                if (failureReason == null && hasShadeAdvantage) {
                     RouteCandidate shade = new RouteCandidate("shade", "그늘이 많은경로", shadeRoute);
                     // 효율성 정보 추가
                     String efficiencyInfo = shade.calculateEfficiencyDisplay(shortestRoute);
                     shade.setDescription(shade.getDescription() + " · " + efficiencyInfo);
                     candidates.add(shade);
-                    logger.info("O 그림자 경로 후보: {}km, {}분, 그늘 {}%, 효율성: {}",
+                    logger.info("O 그림자 경로 후보: {}km, {}분, 그늘 {}% (+{}%), 효율성: {}",
                             shadeRoute.getDistance() / 1000.0, shadeRoute.getDuration(), 
-                            shadeRoute.getShadowPercentage(), efficiencyInfo);
+                            shadeRoute.getShadowPercentage(), shadowDiff, efficiencyInfo);
                 } else {
-                    logger.info("X 그림자 경로 품질 검증 실패: {} - 후보에서 제외", failureReason);
+                    String reason = failureReason != null ? failureReason : "그늘 효과 부족 (" + shadowDiff + "%)";
+                    logger.info("X 그림자 경로 품질 검증 실패: {} - 후보에서 제외", reason);
                 }
             } else {
-                String reason = shortestRoute == null ? "기준 경로 없음" : "그림자 정보 부족";
+                String reason = shadeRoute == null ? "그림자 경로 생성 실패" : "기준 경로 없음";
                 logger.info("X 그림자 경로 생성 불가: {} - 후보에서 제외", reason);
             }
 
@@ -258,6 +264,16 @@ public class RouteCandidateService {
                 logger.info("X 균형 경로 생성 불가: {} - 후보에서 제외", reason);
             }
 
+            // 4. 대안 경로 생성 (그림자 경로가 실패한 경우)
+            if (candidates.size() < 2 && shortestRoute != null) {
+                logger.info("후보 부족으로 대안 경로 생성 시도");
+                RouteCandidate alternativeCandidate = createAlternativeCandidate(routes, shortestRoute);
+                if (alternativeCandidate != null) {
+                    candidates.add(alternativeCandidate);
+                    logger.info("O 대안 경로 추가: {}", alternativeCandidate.getDisplayName());
+                }
+            }
+
             logger.info("타입별 후보 생성 완료: {}개 (유효한 경로만)", candidates.size());
 
         } catch (Exception e) {
@@ -267,6 +283,45 @@ public class RouteCandidateService {
         }
 
         return candidates;
+    }
+
+    /**
+     * 대안 경로 생성 (그림자 경로가 적절하지 않을 때)
+     */
+    private RouteCandidate createAlternativeCandidate(List<Route> routes, Route shortestRoute) {
+        try {
+            // 그늘이 가장 많은 경로 찾기
+            Route bestShadeRoute = routes.stream()
+                    .filter(r -> r.getShadowPercentage() > shortestRoute.getShadowPercentage())
+                    .max((r1, r2) -> Integer.compare(r1.getShadowPercentage(), r2.getShadowPercentage()))
+                    .orElse(null);
+
+            if (bestShadeRoute != null) {
+                RouteCandidate alternative = new RouteCandidate("alternative", "대안경로", bestShadeRoute);
+                String efficiencyInfo = alternative.calculateEfficiencyDisplay(shortestRoute);
+                alternative.setDescription(alternative.getDescription() + " · " + efficiencyInfo);
+                return alternative;
+            }
+
+            // 그늘이 더 많은 경로가 없다면 거리가 다른 경로 찾기
+            Route alternativeRoute = routes.stream()
+                    .filter(r -> !"shortest".equals(r.getRouteType()))
+                    .filter(r -> Math.abs(r.getDistance() - shortestRoute.getDistance()) > 100) // 100m 이상 차이
+                    .findFirst()
+                    .orElse(null);
+
+            if (alternativeRoute != null) {
+                RouteCandidate alternative = new RouteCandidate("alternative", "대안경로", alternativeRoute);
+                String efficiencyInfo = alternative.calculateEfficiencyDisplay(shortestRoute);
+                alternative.setDescription(alternative.getDescription() + " · " + efficiencyInfo);
+                return alternative;
+            }
+
+        } catch (Exception e) {
+            logger.error("대안 경로 생성 오류: " + e.getMessage(), e);
+        }
+
+        return null;
     }
 
 
@@ -370,35 +425,43 @@ public class RouteCandidateService {
                     startLat, startLng, endLat, endLng, sunPos);
 
             if (shadowAreas.isEmpty()) {
-                logger.debug("그림자 영역이 없어 기본 경로 사용");
-                return generateShortestRoute(startLat, startLng, endLat, endLng);
+                logger.debug("그림자 영역이 없어 그림자 경로 생성 불가");
+                return null; // 그림자 데이터가 없으면 null 반환
             }
 
             // 그림자 영역을 의도적으로 경유하는 경유지 생성
             List<RoutePoint> shadeWaypoints = generateShadeTargetingWaypoints(
                     startLat, startLng, endLat, endLng, shadowAreas, sunPos);
 
-            if (shadeWaypoints.isEmpty()) {
-                logger.debug("그림자 경유지 생성 실패, 기본 경로 사용");
-                return generateShortestRoute(startLat, startLng, endLat, endLng);
+            Route enhancedRoute;
+            if (!shadeWaypoints.isEmpty()) {
+                logger.debug("그림자 타겟 경유지 생성: {}개", shadeWaypoints.size());
+
+                // 경유지를 통한 새 경로 생성
+                String waypointRouteJson = tmapApiService.getWalkingRouteWithMultiWaypoints(
+                        startLat, startLng, shadeWaypoints, endLat, endLng);
+
+                enhancedRoute = shadowRouteService.parseBasicRoute(waypointRouteJson);
+            } else {
+                logger.debug("그림자 경유지 생성 실패, 기본 경로로 대체");
+                enhancedRoute = generateShortestRoute(startLat, startLng, endLat, endLng);
             }
 
-            // 그림자 경유지를 포함한 경로 요청
-            String routeJson = tmapApiService.getWalkingRouteWithMultiWaypoints(
-                    startLat, startLng, shadeWaypoints, endLat, endLng);
+            if (enhancedRoute != null) {
+                enhancedRoute.setRouteType("shade");
+                enhancedRoute.setWaypointCount(shadeWaypoints.size());
 
-            Route route = shadowRouteService.parseBasicRoute(routeJson);
-            route.setRouteType("shade");
-            route.setWaypointCount(shadeWaypoints.size());
+                // 실제 그림자 정보만 적용 (인위적 증가 제거)
+                shadowRouteService.applyShadowInfoFromDB(enhancedRoute, shadowAreas);
 
-            // 그림자 정보 적용
-            shadowRouteService.applyShadowInfoFromDB(route, shadowAreas);
+                logger.debug("그림자 경로 생성 성공: 그늘 {}% (실제 데이터)", enhancedRoute.getShadowPercentage());
+            }
 
-            return route;
+            return enhancedRoute;
 
         } catch (Exception e) {
             logger.error("그림자 경로 생성 실패: " + e.getMessage(), e);
-            return generateShortestRoute(startLat, startLng, endLat, endLng);
+            return null; // 오류 시 null 반환
         }
     }
 
