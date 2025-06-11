@@ -699,7 +699,13 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
             displayShadowSegmentsForRoute(route);
 
-            tvRouteInfo.setText(candidate.getDetailedDescription());
+            // 경로 설명에서 detailedDescription 사용 (경유지 제거, 효율성 표시)
+            String routeDescription = candidate.getDetailedDescription();
+            if (routeDescription != null && !routeDescription.isEmpty()) {
+                tvRouteInfo.setText(routeDescription);
+            } else {
+                tvRouteInfo.setText(candidate.getDescription()); // 폴백
+            }
             tvRouteInfo.setVisibility(View.VISIBLE);
 
             if (!allPoints.isEmpty()) {
@@ -743,11 +749,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 createShadowOverlay(currentShadowSegment, segmentCount);
             }
 
-            // 범례 표시
-            if (segmentCount > 0) {
-                LinearLayout shadowLegend = findViewById(R.id.shadow_legend);
-                shadowLegend.setVisibility(View.VISIBLE);
-            }
+
 
         } catch (Exception e) {
             Log.e(TAG, "그림자 구간 표시 오류: " + e.getMessage(), e);
@@ -818,20 +820,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             // 현재 날짜/시간으로 초기화
             updateTimeDisplay(tvSelectedTime, selectedDateTime);
 
-            // 그림자 옵션 라디오 버튼 그룹
-            RadioGroup shadowOptions = findViewById(R.id.radio_group_shadow);
-            RadioButton radioAvoidShadow = findViewById(R.id.radio_avoid_shadow);
-            RadioButton radioFollowShadow = findViewById(R.id.radio_follow_shadow);
 
-            shadowOptions.clearCheck();
-
-            // 경로 선택 전용 상태 변수 추가
-            final int ROUTE_TYPE_BASIC = 0;      // 기본 경로
-            final int ROUTE_TYPE_AVOID = 1;      // 그림자 회피 경로
-            final int ROUTE_TYPE_FOLLOW = 2;     // 그림자 따라가기 경로
-
-            // 현재 선택된 경로 상태 (초기값: 기본 경로)
-            final int[] currentRouteType = {ROUTE_TYPE_BASIC};
 
             // 날짜/시간 선택 버튼 이벤트
             btnSelectTime.setOnClickListener(v -> {
@@ -851,34 +840,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 });
             });
 
-            // 그림자 옵션 변경 이벤트
-            shadowOptions.setOnCheckedChangeListener((group, checkedId) -> {
-                if (checkedId == R.id.radio_avoid_shadow) {
-                    Log.d(TAG, "그림자 회피 라디오 버튼 선택됨");
-                    avoidShadow = true;
-                    currentRouteType[0] = ROUTE_TYPE_AVOID;
-                } else if (checkedId == R.id.radio_follow_shadow) {
-                    Log.d(TAG, "그림자 따라가기 라디오 버튼 선택됨");
-                    avoidShadow = false;
-                    currentRouteType[0] = ROUTE_TYPE_FOLLOW;
-                }
 
-                isInitialRouteDisplay = false;
-
-                // 경로가 설정된 상태라면 즉시 새 경로 요청
-                if (currentLocation != null && destinationPoint != null) {
-                    Log.d(TAG, "라디오 버튼 선택 변경으로 새 경로 요청: avoidShadow=" + avoidShadow);
-
-                    // 로딩 상태 표시
-                    progressBar.setVisibility(View.VISIBLE);
-                    Toast.makeText(MapActivity.this, "경로를 계산하는 중...", Toast.LENGTH_SHORT).show();
-
-                    // 즉시 경로 요청 실행 (별도 스레드에서)
-                    new Thread(() -> {
-                        requestCandidateRoutes();
-                    }).start();
-                }
-            });
 
             // 그림자 설정 패널 토글 버튼
             Button btnToggleShadowSettings = findViewById(R.id.btn_toggle_shadow_settings);
@@ -996,8 +958,6 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
             // UI 요소 숨기기
             tvRouteInfo.setVisibility(View.GONE);
-            LinearLayout shadowLegend = findViewById(R.id.shadow_legend);
-            shadowLegend.setVisibility(View.GONE);
 
             Log.d(TAG, "모든 경로 제거 완료");
         } catch (Exception e) {
