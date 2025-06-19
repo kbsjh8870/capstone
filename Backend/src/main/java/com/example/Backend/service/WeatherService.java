@@ -74,53 +74,6 @@ public class WeatherService {
     }
 
     /**
-     * 날씨 데이터 분석
-     */
-    private boolean analyzeWeatherData(JsonNode weatherData) {
-        try {
-            // 현재 날씨 상태
-            JsonNode weatherArray = weatherData.get("weather");
-            String mainWeather = weatherArray.get(0).get("main").asText();
-            String description = weatherArray.get(0).get("description").asText();
-
-            // 구름 정보
-            JsonNode clouds = weatherData.get("clouds");
-            int cloudiness = clouds != null ? clouds.get("all").asInt(0) : 0;
-
-            // 비 정보
-            JsonNode rain = weatherData.get("rain");
-            double rainVolume = 0.0;
-            if (rain != null && rain.has("1h")) {
-                rainVolume = rain.get("1h").asDouble(0.0); // 1시간 강수량
-            }
-
-            // 시야 거리
-            int visibility = weatherData.has("visibility") ? weatherData.get("visibility").asInt(10000) : 10000; // 기본값 10km
-
-            logger.debug("날씨 분석: 상태={}, 설명={}, 구름={}%, 강수량={}mm, 시야={}m",
-                    mainWeather, description, cloudiness, rainVolume, visibility);
-
-            // 나쁜 날씨 조건들
-            boolean isRainy = "Rain".equals(mainWeather) || "Drizzle".equals(mainWeather) || rainVolume > 0.1;
-            boolean isCloudy = "Clouds".equals(mainWeather) && cloudiness >= 80; // 80% 이상 흐림
-            boolean isStormy = "Thunderstorm".equals(mainWeather);
-            boolean isSnowy = "Snow".equals(mainWeather);
-            boolean isFoggy = "Mist".equals(mainWeather) || "Fog".equals(mainWeather) || visibility < 1000;
-
-            boolean isBadWeather = isRainy || isCloudy || isStormy || isSnowy || isFoggy;
-
-            logger.info("날씨 판단 결과: {} (비={}, 흐림={}, 폭풍={}, 눈={}, 안개={})",
-                    isBadWeather ? "나쁨" : "좋음", isRainy, isCloudy, isStormy, isSnowy, isFoggy);
-
-            return isBadWeather;
-
-        } catch (Exception e) {
-            logger.error("날씨 데이터 분석 오류: " + e.getMessage(), e);
-            return false;
-        }
-    }
-
-    /**
      * 상세 날씨 정보 조회 (디버깅 및 로그용)
      */
     public String getWeatherDescription(double lat, double lng) {

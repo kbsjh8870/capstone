@@ -12,7 +12,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Service
 public class RouteCandidateService {
@@ -451,7 +450,6 @@ public class RouteCandidateService {
                 enhancedRoute.setRouteType("shade");
                 enhancedRoute.setWaypointCount(shadeWaypoints.size());
 
-                // 실제 그림자 정보만 적용 (인위적 증가 제거)
                 shadowRouteService.applyShadowInfoFromDB(enhancedRoute, shadowAreas);
 
                 logger.debug("그림자 경로 생성 성공: 그늘 {}% (실제 데이터)", enhancedRoute.getShadowPercentage());
@@ -559,7 +557,7 @@ public class RouteCandidateService {
     }
 
     /**
-     * 균형잡힌 경유지 생성 (그림자도 고려하되 거리도 중요시)
+     * 균형잡힌 경유지 생성 (그림자, 거리 고려)
      */
     private List<RoutePoint> generateBalancedWaypoints(Route baseRoute, double startLat, double startLng,
                                                        double endLat, double endLng, SunPosition sunPos) {
@@ -580,7 +578,7 @@ public class RouteCandidateService {
             for (int index : Arrays.asList(oneThirdIndex, twoThirdIndex)) {
                 RoutePoint basePoint = basePoints.get(index);
 
-                // 적당한 오프셋 (50-100m 범위)
+                // (50-100m 범위)
                 double offsetDistance = 0.0005 + random.nextDouble() * 0.0005; // 50-100m
                 double offsetDirection = random.nextDouble() * 2 * Math.PI;
 
@@ -794,151 +792,6 @@ public class RouteCandidateService {
                 (long) normalizedEndLng;
     }
 
-    /**
-     * 변형 경로 유효성 검증
-     */
-    private boolean isValidVariant(Route baseRoute, Route variant) {
-        try {
-            // 1. 거리 검증 (기본 경로 대비 200% 이하)
-            double distanceRatio = variant.getDistance() / baseRoute.getDistance();
-            if (distanceRatio > 2.0) {
-                logger.debug("변형 경로 거리 초과: {}% (기준: 200%)", (int)(distanceRatio * 100));
-                return false;
-            }
-
-            // 2. 포인트 수 검증 (기본 경로 대비 30% 이상)
-            if (variant.getPoints().size() < baseRoute.getPoints().size() * 0.3) {
-                logger.debug("변형 경로 포인트 수 부족");
-                return false;
-            }
-
-            // 3. 방향성 검증 (역방향 이동 체크)
-            if (!isForwardProgression(variant)) {
-                logger.debug("변형 경로 역방향 이동 감지");
-                return false;
-            }
-
-            logger.debug("변형 경로 유효성 검증 통과: 거리 비율 {}%", (int)(distanceRatio * 100));
-            return true;
-
-        } catch (Exception e) {
-            logger.error("변형 경로 유효성 검증 오류: " + e.getMessage(), e);
-            return false;
-        }
-    }
-
-    /**
-     * 경로가 전진하는지 확인 (역방향 이동 방지)
-     */
-    private boolean isForwardProgression(Route route) {
-        try {
-            List<RoutePoint> points = route.getPoints();
-            if (points.size() < 3) return true;
-
-            RoutePoint start = points.get(0);
-            RoutePoint end = points.get(points.size() - 1);
-
-            // 목적지로의 대략적인 방향 계산
-            double targetDirection = Math.atan2(
-                    end.getLng() - start.getLng(),
-                    end.getLat() - start.getLat()
-            );
-
-            // 경로의 중간 지점들이 대체로 목적지 방향으로 향하는지 확인
-            int forwardCount = 0;
-            int totalSegments = 0;
-
-            for (int i = 0; i < points.size() - 5; i += 5) { // 5개씩 건너뛰며 샘플링
-                RoutePoint current = points.get(i);
-                RoutePoint next = points.get(i + 5);
-
-                double segmentDirection = Math.atan2(
-                        next.getLng() - current.getLng(),
-                        next.getLat() - current.getLat()
-                );
-
-                double directionDiff = Math.abs(segmentDirection - targetDirection);
-                if (directionDiff > Math.PI) {
-                    directionDiff = 2 * Math.PI - directionDiff;
-                }
-
-                // 90도 이내면 전진으로 간주
-                if (directionDiff <= Math.PI / 2) {
-                    forwardCount++;
-                }
-                totalSegments++;
-            }
-
-            // 70% 이상의 구간이 전진 방향이면 유효
-            double forwardRatio = totalSegments > 0 ? (double) forwardCount / totalSegments : 1.0;
-            boolean isValid = forwardRatio >= 0.7;
-
-            logger.debug("전진 비율: {}% (기준: 70%)", (int)(forwardRatio * 100));
-            return isValid;
-
-        } catch (Exception e) {
-            logger.error("전진성 검증 오류: " + e.getMessage(), e);
-            return true; // 오류 시 허용
-        }
-    }
-
-    /**
-     * 경로 필터링 및 품질 검증
-     */
-    private List<Route> filterAndValidateRoutes(List<Route> routes, double startLat, double startLng,
-                                                double endLat, double endLng) {
-        List<Route> validRoutes = new ArrayList<>();
-
-        try {
-            // 기본 경로는 항상 포함
-            Route baseRoute = routes.stream()
-                    .filter(r -> "shortest".equals(r.getRouteType()))
-                    .findFirst()
-                    .orElse(null);
-
-            if (baseRoute != null) {
-                validRoutes.add(baseRoute);
-                logger.debug("기본 경로 포함: 거리={}m", (int)baseRoute.getDistance());
-            }
-
-            // 변형 경로들 검증 및 중복 제거
-            for (Route route : routes) {
-                if ("shortest".equals(route.getRouteType())) continue;
-
-                // 품질 검증
-                if (baseRoute != null && !isValidVariant(baseRoute, route)) {
-                    logger.debug("품질 검증 실패로 경로 제외: {}", route.getRouteType());
-                    continue;
-                }
-
-                // 중복 검증
-                boolean isDuplicate = false;
-                for (Route existing : validRoutes) {
-                    if (calculateRouteSimilarity(route, existing) > 0.85) {
-                        isDuplicate = true;
-                        logger.debug("중복 경로로 제외: {} vs {}", route.getRouteType(), existing.getRouteType());
-                        break;
-                    }
-                }
-
-                if (!isDuplicate) {
-                    validRoutes.add(route);
-                    logger.debug("유효 경로 추가: {}, 거리={}m", route.getRouteType(), (int)route.getDistance());
-                }
-            }
-
-            logger.info("경로 필터링 완료: {}개 → {}개", routes.size(), validRoutes.size());
-
-        } catch (Exception e) {
-            logger.error("경로 필터링 오류: " + e.getMessage(), e);
-            // 오류 시 최소한 첫 번째 경로라도 반환
-            if (!routes.isEmpty()) {
-                validRoutes.add(routes.get(0));
-            }
-        }
-
-        return validRoutes;
-    }
 
     /**
      * 그림자 점수 계산
@@ -974,158 +827,6 @@ public class RouteCandidateService {
                 route.setShadowPercentage(0);
             }
         }
-    }
-
-    /**
-     * 3개 후보 선정
-     */
-    private List<RouteCandidate> selectTopThreeCandidates(List<Route> routes) {
-        if (routes.isEmpty()) {
-            return new ArrayList<>();
-        }
-
-        try {
-            logger.info("3개 후보 경로 선정 시작");
-
-            Route shortestRoute = routes.stream()
-                    .min(Comparator.comparing(Route::getDistance))
-                    .orElse(routes.get(0));
-
-            Route shadeRoute = routes.stream()
-                    .max(Comparator.comparing(Route::getShadowPercentage))
-                    .orElse(routes.get(0));
-
-            Route balancedRoute = routes.stream()
-                    .min(Comparator.comparing(route -> calculateBalanceScore(route, routes)))
-                    .orElse(routes.get(0));
-
-            List<Route> selectedRoutes = Arrays.asList(shortestRoute, shadeRoute, balancedRoute);
-            List<Route> finalRoutes = ensureUniqueSelection(selectedRoutes, routes);
-
-            List<RouteCandidate> candidates = new ArrayList<>();
-            candidates.add(new RouteCandidate("shortest", "최단경로", finalRoutes.get(0)));
-            candidates.add(new RouteCandidate("shade", "그늘이 많은경로", finalRoutes.get(1)));
-            candidates.add(new RouteCandidate("balanced", "균형경로", finalRoutes.get(2)));
-
-            logger.info("3개 후보 선정 완료:");
-            for (RouteCandidate candidate : candidates) {
-                logger.info("  {}: {}km, {}분, 그늘 {}%",
-                        candidate.getDisplayName(),
-                        candidate.getRoute().getDistance() / 1000.0,
-                        candidate.getRoute().getDuration(),
-                        candidate.getRoute().getShadowPercentage());
-            }
-
-            return candidates;
-
-        } catch (Exception e) {
-            logger.error("후보 선정 오류: " + e.getMessage(), e);
-            Route fallbackRoute = routes.get(0);
-            return Arrays.asList(
-                    new RouteCandidate("shortest", "추천경로 1", fallbackRoute),
-                    new RouteCandidate("shade", "추천경로 2", fallbackRoute),
-                    new RouteCandidate("balanced", "추천경로 3", fallbackRoute)
-            );
-        }
-    }
-
-    /**
-     * 균형 점수 계산
-     */
-    private double calculateBalanceScore(Route route, List<Route> allRoutes) {
-        try {
-            double minDistance = allRoutes.stream().mapToDouble(Route::getDistance).min().orElse(1.0);
-            double maxDistance = allRoutes.stream().mapToDouble(Route::getDistance).max().orElse(1.0);
-            double distanceRange = maxDistance - minDistance;
-
-            double normalizedDistance = distanceRange > 0 ?
-                    (route.getDistance() - minDistance) / distanceRange : 0;
-
-            double normalizedShade = route.getShadowPercentage() / 100.0;
-
-            double shadeScore;
-            if (normalizedShade < 0.3) {
-                shadeScore = 0.3 - normalizedShade;
-            } else if (normalizedShade > 0.7) {
-                shadeScore = normalizedShade - 0.7;
-            } else {
-                shadeScore = 0;
-            }
-
-            return normalizedDistance * 0.6 + shadeScore * 0.4;
-
-        } catch (Exception e) {
-            logger.warn("균형 점수 계산 오류: " + e.getMessage());
-            return 0.5;
-        }
-    }
-
-    /**
-     * 고유한 경로 선택 보장
-     */
-    private List<Route> ensureUniqueSelection(List<Route> selectedRoutes, List<Route> allRoutes) {
-        List<Route> uniqueRoutes = new ArrayList<>();
-
-        for (Route selected : selectedRoutes) {
-            boolean isAlreadySelected = false;
-
-            for (Route existing : uniqueRoutes) {
-                if (calculateRouteSimilarity(selected, existing) > 0.9) {
-                    isAlreadySelected = true;
-                    break;
-                }
-            }
-
-            if (!isAlreadySelected) {
-                uniqueRoutes.add(selected);
-            } else {
-                Route alternative = findAlternativeRoute(uniqueRoutes, allRoutes);
-                uniqueRoutes.add(alternative);
-            }
-        }
-
-        while (uniqueRoutes.size() < 3 && uniqueRoutes.size() < allRoutes.size()) {
-            for (Route route : allRoutes) {
-                if (uniqueRoutes.size() >= 3) break;
-
-                boolean isUnique = true;
-                for (Route existing : uniqueRoutes) {
-                    if (calculateRouteSimilarity(route, existing) > 0.9) {
-                        isUnique = false;
-                        break;
-                    }
-                }
-
-                if (isUnique) {
-                    uniqueRoutes.add(route);
-                }
-            }
-            break;
-        }
-
-        return uniqueRoutes;
-    }
-
-    /**
-     * 대안 경로 찾기
-     */
-    private Route findAlternativeRoute(List<Route> selectedRoutes, List<Route> allRoutes) {
-        for (Route candidate : allRoutes) {
-            boolean isUnique = true;
-
-            for (Route selected : selectedRoutes) {
-                if (calculateRouteSimilarity(candidate, selected) > 0.9) {
-                    isUnique = false;
-                    break;
-                }
-            }
-
-            if (isUnique) {
-                return candidate;
-            }
-        }
-
-        return allRoutes.get(0);
     }
 
     /**
