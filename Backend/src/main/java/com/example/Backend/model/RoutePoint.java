@@ -16,7 +16,6 @@ public class RoutePoint {
     @JsonProperty("inShadow")
     private boolean inShadow = false;
 
-    // 명시적 JSON 처리 메서드 강화
     @JsonGetter("inShadow")
     public boolean isInShadow() {
         return this.inShadow;
@@ -27,7 +26,7 @@ public class RoutePoint {
         this.inShadow = inShadow;
     }
 
-    // toString 메서드에 inShadow 포함 (디버깅용)
+    // toString 메서드에 inShadow (디버깅용)
     @Override
     public String toString() {
         return String.format("RoutePoint{lat=%.6f, lng=%.6f, inShadow=%s}", lat, lng, inShadow);

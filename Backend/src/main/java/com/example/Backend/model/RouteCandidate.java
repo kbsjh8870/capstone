@@ -179,7 +179,6 @@ public class RouteCandidate {
         }
     }
 
-    // Setter 메서드들 추가
     public void setDescription(String description) {
         this.description = description;
     }
