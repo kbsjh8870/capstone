@@ -309,22 +309,25 @@ public class ShadowRouteService {
             RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
             RoutePoint middlePoint = basePoints.get(basePoints.size() / 2);
 
+            // 목적지 방향 계산 (북쪽 기준 0-360도)
             double destinationDirection = calculateBearing(startPoint, endPoint);
 
+            // 원하는 경유지 방향 계산 (태양/그림자 방향)
             double preferredDirection;
             if (avoidShadow) {
-                preferredDirection = sunPos.getAzimuth();
+                preferredDirection = sunPos.getAzimuth(); // 태양 방향
             } else {
-                preferredDirection = (sunPos.getAzimuth() + 180) % 360;
+                preferredDirection = (sunPos.getAzimuth() + 180) % 360; // 그림자 방향
             }
 
+            //  목적지 방향 제약 적용
             double constrainedDirection = constrainDirectionToDestination(
                     preferredDirection, destinationDirection);
 
-            // 경유지 거리 40m → 20m
-            double detourMeters = 20.0;
+            // 경유지 거리 (짧게 유지)
+            double detourMeters = 40.0;
 
-            // 좌표 계산
+            // 지리적 좌표로 변환
             double directionRad = Math.toRadians(constrainedDirection);
             double latDegreeInMeters = 111000.0;
             double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
@@ -336,31 +339,30 @@ public class ShadowRouteService {
             waypoint.setLat(middlePoint.getLat() + latOffset);
             waypoint.setLng(middlePoint.getLng() + lngOffset);
 
-            // 유효성 검사 (한국 좌표 범위)
-            if (waypoint.getLat() >= 33.0 && waypoint.getLat() <= 39.0 &&
-                    waypoint.getLng() >= 124.0 && waypoint.getLng() <= 132.0) {
-
-                if (isWaypointProgressive(startPoint, waypoint, endPoint)) {
-                    return waypoint;
-                }
+            // 경유지가 목적지 방향으로 진행하는지 검증
+            if (!isWaypointProgressive(startPoint, waypoint, endPoint)) {
+                logger.debug("경유지가 목적지 방향으로 진행하지 않음 - 거부");
+                return null;
             }
 
-            return null;
+            logger.debug("제약된 경유지 생성: 원하는방향={}도, 목적지방향={}도, 최종방향={}도",
+                    preferredDirection, destinationDirection, constrainedDirection);
+
+            return waypoint;
 
         } catch (Exception e) {
-            logger.error("전략적 경유지 생성 오류: " + e.getMessage(), e);
+            logger.error("제약된 경유지 계산 오류: " + e.getMessage(), e);
             return null;
         }
     }
-
 
     /**
      * 목적지 방향을 고려하여 경유지 방향 제약
      */
     private double constrainDirectionToDestination(double preferredDirection, double destinationDirection) {
         try {
-            // 목적지 방향 ±60도 범위 내에서만 경유지 설정 허용
-            double maxAngleDiff = 60.0;
+            // 목적지 방향 ±120도 범위 내에서만 경유지 설정 허용
+            double maxAngleDiff = 120.0;
 
             // 두 방향 간의 각도 차이 계산 (0-180도)
             double angleDiff = Math.abs(preferredDirection - destinationDirection);
@@ -445,9 +447,9 @@ public class ShadowRouteService {
             // 경유지를 거친 총 거리
             double totalViaWaypoint = distanceToWaypoint + waypointToEnd;
 
-            // 경유지를 거친 거리가 직선 거리의 120% 이하여야 함
+            // 경유지를 거친 거리가 직선 거리의 150% 이하여야 함
             double detourRatio = totalViaWaypoint / directDistance;
-            if (detourRatio > 1.2) {
+            if (detourRatio > 1.5) {
                 logger.debug("경유지 우회 비율 과다: {}% > 150%", (int)(detourRatio * 100));
                 return false;
             }
