@@ -196,7 +196,7 @@ public class RouteCandidateService {
     }
 
     /**
-     * 타입별 후보 생성 (기존 선정 방식을 대체)
+     * 타입별 후보 생성
      */
     private List<RouteCandidate> createTypedCandidates(List<Route> routes) {
         List<RouteCandidate> candidates = new ArrayList<>();
@@ -215,31 +215,30 @@ public class RouteCandidateService {
                 logger.info("X 최단경로 생성 불가 - 후보에서 제외");
             }
 
-            // 2. 그림자 많은 경로 후보 (품질 검증 강화)
+            // 2. 그림자 많은 경로 후보
             Route shadeRoute = findRouteByType(routes, "shade");
             if (shadeRoute != null && shortestRoute != null) {
                 String failureReason = validateRouteQuality(shadeRoute, shortestRoute, "shade");
-                
-                // 그림자 효과 검증 강화
-                int shadowDiff = shadeRoute.getShadowPercentage() - shortestRoute.getShadowPercentage();
-                boolean hasShadeAdvantage = shadowDiff >= 5; // 최소 5% 이상 그늘이 많아야 함
-                
-                if (failureReason == null && hasShadeAdvantage) {
-                    RouteCandidate shade = new RouteCandidate("shade", "그늘이 많은경로", shadeRoute);
-                    // 효율성 정보 추가
-                    String efficiencyInfo = shade.calculateEfficiencyDisplay(shortestRoute);
-                    shade.setDescription(shade.getDescription() + " · " + efficiencyInfo);
-                    candidates.add(shade);
-                    logger.info("O 그림자 경로 후보: {}km, {}분, 그늘 {}% (+{}%), 효율성: {}",
-                            shadeRoute.getDistance() / 1000.0, shadeRoute.getDuration(), 
-                            shadeRoute.getShadowPercentage(), shadowDiff, efficiencyInfo);
+
+                if (failureReason == null) {
+                    int shadowDiff = shadeRoute.getShadowPercentage() - shortestRoute.getShadowPercentage();
+                    if (shadowDiff >= 10) { // 최소 10% 이상 그늘이 많아야 함
+                        RouteCandidate shade = new RouteCandidate("shade", "그늘이 많은경로", shadeRoute);
+                        String efficiencyInfo = shade.calculateEfficiencyDisplay(shortestRoute);
+                        shade.setDescription(shade.getDescription() + " · " + efficiencyInfo);
+                        candidates.add(shade);
+                        logger.info("그림자 경로 후보: {}km, {}분, 그늘 {}% (+{}%), 효율성: {}",
+                                shadeRoute.getDistance() / 1000.0, shadeRoute.getDuration(),
+                                shadeRoute.getShadowPercentage(), shadowDiff, efficiencyInfo);
+                    } else {
+                        logger.info("그림자 경로 효과 부족: 그늘 차이 {}% < 10% - 후보에서 제외", shadowDiff);
+                    }
                 } else {
-                    String reason = failureReason != null ? failureReason : "그늘 효과 부족 (" + shadowDiff + "%)";
-                    logger.info("X 그림자 경로 품질 검증 실패: {} - 후보에서 제외", reason);
+                    logger.info("그림자 경로 품질 검증 실패: {} - 후보에서 제외", failureReason);
                 }
             } else {
                 String reason = shadeRoute == null ? "그림자 경로 생성 실패" : "기준 경로 없음";
-                logger.info("X 그림자 경로 생성 불가: {} - 후보에서 제외", reason);
+                logger.info("그림자 경로 생성 불가: {} - 후보에서 제외", reason);
             }
 
             // 3. 균형 경로 후보
@@ -263,7 +262,7 @@ public class RouteCandidateService {
                 logger.info("X 균형 경로 생성 불가: {} - 후보에서 제외", reason);
             }
 
-            // 4. 대안 경로 생성 (그림자 경로가 실패한 경우)
+           /* // 4. 대안 경로 생성 (그림자 경로가 실패한 경우)
             if (candidates.size() < 2 && shortestRoute != null) {
                 logger.info("후보 부족으로 대안 경로 생성 시도");
                 RouteCandidate alternativeCandidate = createAlternativeCandidate(routes, shortestRoute);
@@ -271,9 +270,14 @@ public class RouteCandidateService {
                     candidates.add(alternativeCandidate);
                     logger.info("O 대안 경로 추가: {}", alternativeCandidate.getDisplayName());
                 }
+            }*/
+
+            if (candidates.size() < 2) {
+                logger.info("생성된 후보 경로가 {}개", candidates.size());
             }
 
-            logger.info("타입별 후보 생성 완료: {}개 (유효한 경로만)", candidates.size());
+            logger.info("타입별 후보 생성 완료: {}개", candidates.size());
+
 
         } catch (Exception e) {
             logger.error("타입별 후보 생성 오류: " + e.getMessage(), e);
@@ -329,25 +333,32 @@ public class RouteCandidateService {
      */
     private String validateRouteQuality(Route targetRoute, Route baseRoute, String routeType) {
         try {
-            // 1. 거리 검증
+            // 1. 거리 검증 (더 엄격하게)
             double distanceRatio = targetRoute.getDistance() / baseRoute.getDistance();
-            double maxRatio = "shade".equals(routeType) ? 2.0 : 1.5; // 그림자: 200%, 균형: 150%
+            double maxRatio;
+
+            if ("shade".equals(routeType)) {
+                maxRatio = 1.4; // 그림자: 140%
+            } else {
+                maxRatio = 1.25; // 균형: 125%
+            }
 
             if (distanceRatio > maxRatio) {
-                return String.format("우회 거리 과다 (%.0f%% 증가)", (distanceRatio - 1) * 100);
+                return String.format("우회 거리 과다 (%.0f%% 증가 > %.0f%% 허용)",
+                        (distanceRatio - 1) * 100, (maxRatio - 1) * 100);
             }
 
             // 2. 유사도 검증
             double similarity = calculateRouteSimilarity(targetRoute, baseRoute);
-            if (similarity > 0.85) {
-                return String.format("경로 차이 미미 (유사도 %.0f%%)", similarity * 100);
+            if (similarity > 0.8) {
+                return String.format("경로 차이 미미 (유사도 %.0f%% > 80%%)", similarity * 100);
             }
 
             // 3. 그림자 경로 전용 검증
             if ("shade".equals(routeType)) {
                 int shadowDiff = Math.abs(targetRoute.getShadowPercentage() - baseRoute.getShadowPercentage());
-                if (shadowDiff < 5) {
-                    return String.format("그늘 효과 미미 (차이 %d%%)", shadowDiff);
+                if (shadowDiff < 10) {
+                    return String.format("그늘 효과 미미 (차이 %d%% < 10%%)", shadowDiff);
                 }
             }
 
@@ -356,10 +367,50 @@ public class RouteCandidateService {
                 return "경로가 너무 짧음";
             }
 
+            // 경로 모양 검증 (직선성 검사)
+            if (hasExcessiveStraightSegments(targetRoute)) {
+                return "비정상적인 직선 구간 포함";
+            }
+
             return null; // 검증 통과
 
         } catch (Exception e) {
             return "검증 오류 발생";
+        }
+    }
+
+    /**
+     * 직선성 검사
+     */
+    private boolean hasExcessiveStraightSegments(Route route) {
+        try {
+            List<RoutePoint> points = route.getPoints();
+            if (points.size() < 3) return false;
+
+            int longSegments = 0;
+            final double MAX_SEGMENT_LENGTH = 150.0; // 150m 이상 구간은 의심
+
+            for (int i = 0; i < points.size() - 1; i++) {
+                RoutePoint current = points.get(i);
+                RoutePoint next = points.get(i + 1);
+
+                double segmentDistance = calculateDistance(
+                        current.getLat(), current.getLng(),
+                        next.getLat(), next.getLng()
+                );
+
+                if (segmentDistance > MAX_SEGMENT_LENGTH) {
+                    longSegments++;
+                }
+            }
+
+            // 전체 구간의 10% 이상이 긴 구간이면 문제
+            double longSegmentRatio = (double) longSegments / (points.size() - 1);
+            return longSegmentRatio > 0.1;
+
+        } catch (Exception e) {
+            logger.warn("직선 구간 검사 오류: " + e.getMessage());
+            return false;
         }
     }
 
@@ -633,8 +684,8 @@ public class RouteCandidateService {
      */
     private double constrainDirectionToDestination(double preferredDirection, double destinationDirection) {
         try {
-            // 목적지 방향 ±120도 범위 내에서만 경유지 설정 허용
-            double maxAngleDiff = 120.0;
+            // 목적지 방향 ±90도 범위 내에서만 경유지 설정 허용
+            double maxAngleDiff = 90.0;
 
             // 두 방향 간의 각도 차이 계산
             double angleDiff = Math.abs(preferredDirection - destinationDirection);
@@ -704,15 +755,18 @@ public class RouteCandidateService {
                     waypoint.getLat(), waypoint.getLng(),
                     end.getLat(), end.getLng());
 
-            // 경유지를 거친 총 거리가 직선 거리의 140% 이하여야 함
+            // 경유지를 거친 총 거리가 직선 거리의 130% 이하여야 함
             double totalViaWaypoint = distanceToWaypoint + waypointToEnd;
             double detourRatio = totalViaWaypoint / directDistance;
-            if (detourRatio > 1.4) {
+            if (detourRatio > 1.3) {
+                logger.debug("경유지 우회 비율 과다: {}% > 130%", (int)(detourRatio * 100));
                 return false;
             }
 
             // 경유지가 출발지보다 목적지에 더 가까워야 함
-            if (waypointToEnd >= directDistance * 0.9) { // 90% 이상 가까워져야 함
+            if (waypointToEnd >= directDistance * 0.85) { // 85% 이상 가까워져야 함
+                logger.debug("경유지가 목적지 접근 부족: 경유지→목적지={}m, 직선거리={}m ({}%)",
+                        (int)waypointToEnd, (int)directDistance, (int)(waypointToEnd/directDistance*100));
                 return false;
             }
 
