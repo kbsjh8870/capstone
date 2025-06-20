@@ -89,7 +89,7 @@ public class RouteCandidateService {
             long startTime = System.currentTimeMillis();
 
             // 최단경로 (기준점)
-            Route shortestRoute = generateShortestRoute(startLat, startLng, endLat, endLng);
+            Route shortestRoute = generateShortestRoute(startLat, startLng, endLat, endLng, dateTime);
             if (shortestRoute == null) {
                 logger.error("기준 최단경로 생성 실패");
                 return generateShortestRouteOnly(startLat, startLng, endLat, endLng, dateTime);
@@ -182,7 +182,7 @@ public class RouteCandidateService {
 
             if (shadowAreas.isEmpty()) {
                 logger.debug("그림자 영역 없음 - 기본 경로 사용");
-                return generateShortestRoute(startLat, startLng, endLat, endLng);
+                return generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
             }
 
             // 경유지 생성 (적응적 개수)
@@ -193,7 +193,7 @@ public class RouteCandidateService {
 
             if (waypointCandidates.isEmpty()) {
                 logger.warn("그림자 경유지 생성 실패 - 기본 경로 사용");
-                return generateShortestRoute(startLat, startLng, endLat, endLng);
+                return generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
             }
 
             // 배치 호출
@@ -210,7 +210,7 @@ public class RouteCandidateService {
                         bestRoute.getShadowPercentage(), (int)bestRoute.getDistance());
             } else {
                 logger.warn("적합한 그림자 경로 없음 - 기본 경로 사용");
-                bestRoute = generateShortestRoute(startLat, startLng, endLat, endLng);
+                bestRoute = generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
             }
 
             return bestRoute;
@@ -240,7 +240,7 @@ public class RouteCandidateService {
 
             if (waypointCandidates.isEmpty()) {
                 logger.warn("균형 경유지 생성 실패 - 기본 경로 변형 사용");
-                Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng);
+                Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
                 return createSlightVariation(baseRoute, startLat, startLng, endLat, endLng);
             }
 
@@ -249,7 +249,7 @@ public class RouteCandidateService {
                     waypointCandidates, startLat, startLng, endLat, endLng, shadowAreas, 5);
 
             // 기준 경로
-            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng);
+            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
 
             Route bestRoute = selectBestBalancedRouteAdvanced(candidateRoutes, baseRoute);
 
@@ -267,7 +267,7 @@ public class RouteCandidateService {
 
         } catch (Exception e) {
             logger.error("다중 경유지 균형 경로 생성 실패: " + e.getMessage(), e);
-            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng);
+            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
             return createSlightVariation(baseRoute, startLat, startLng, endLat, endLng);
         }
     }
@@ -811,7 +811,7 @@ public class RouteCandidateService {
     /**
      *  최단경로 생성
      */
-    private Route generateShortestRoute(double startLat, double startLng, double endLat, double endLng) {
+    private Route generateShortestRoute(double startLat, double startLng, double endLat, double endLng ,  LocalDateTime  dateTime) {
         try {
             logger.debug("최단경로 생성 중...");
 
@@ -820,6 +820,20 @@ public class RouteCandidateService {
 
             route.setRouteType("shortest");
             route.setWaypointCount(0);
+
+            try {
+                SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
+                List<ShadowArea> shadowAreas = shadowRouteService.calculateBuildingShadows(
+                        startLat, startLng, endLat, endLng, sunPos);
+
+                if (!shadowAreas.isEmpty()) {
+                    shadowRouteService.applyShadowInfoFromDB(route, shadowAreas);
+                    logger.debug("최단경로 그림자 정보 적용: {}%", route.getShadowPercentage());
+                }
+            } catch (Exception e) {
+                logger.warn("최단경로 그림자 정보 적용 실패: " + e.getMessage());
+                route.setShadowPercentage(0);
+            }
 
             return route;
 
@@ -834,8 +848,8 @@ public class RouteCandidateService {
      */
     private double constrainDirectionToDestination(double preferredDirection, double destinationDirection) {
         try {
-            // 목적지 방향 ±90도 범위 내에서만 경유지 설정 허용
-            double maxAngleDiff = 90.0;
+            // 목적지 방향 ±75도 범위 내에서만 경유지 설정 허용
+            double maxAngleDiff = 75.0;
 
             // 두 방향 간의 각도 차이 계산
             double angleDiff = Math.abs(preferredDirection - destinationDirection);
@@ -905,18 +919,28 @@ public class RouteCandidateService {
                     waypoint.getLat(), waypoint.getLng(),
                     end.getLat(), end.getLng());
 
-            // 경유지를 거친 총 거리가 직선 거리의 130% 이하여야 함
+            // 경유지를 거친 총 거리가 직선 거리의 120% 이하여야 함
             double totalViaWaypoint = distanceToWaypoint + waypointToEnd;
             double detourRatio = totalViaWaypoint / directDistance;
-            if (detourRatio > 1.3) {
+            if (detourRatio > 1.2) {
                 logger.debug("경유지 우회 비율 과다: {}% > 130%", (int)(detourRatio * 100));
                 return false;
             }
 
             // 경유지가 출발지보다 목적지에 더 가까워야 함
-            if (waypointToEnd >= directDistance * 0.85) { // 85% 이상 가까워져야 함
+            if (waypointToEnd >= directDistance * 0.8) { // 80% 이상 가까워져야 함
                 logger.debug("경유지가 목적지 접근 부족: 경유지→목적지={}m, 직선거리={}m ({}%)",
                         (int)waypointToEnd, (int)directDistance, (int)(waypointToEnd/directDistance*100));
+                return false;
+            }
+
+            double startToWaypointBearing = calculateBearing(start, waypoint);
+            double startToEndBearing = calculateBearing(start, end);
+            double bearingDiff = Math.abs(startToWaypointBearing - startToEndBearing);
+            if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
+
+            if (bearingDiff > 90) { // 방향 차이가 90도 초과하면 거부
+                logger.debug("경유지 방향 편차 과다: {}도 > 90도", (int)bearingDiff);
                 return false;
             }
 
