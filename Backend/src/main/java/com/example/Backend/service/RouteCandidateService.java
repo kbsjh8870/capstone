@@ -416,9 +416,14 @@ public class RouteCandidateService {
                 return false;
             }
 
-            // 거리 비율 검증 (더 엄격)
+            if (isAbnormalRoute(route, baseRoute)) {
+                logger.debug("이상한 우회 패턴 감지 - 경로 거부");
+                return false;
+            }
+
+            // 거리 비율 검증
             double distanceRatio = route.getDistance() / baseRoute.getDistance();
-            double maxRatio = "shade".equals(routeType) ? 1.6 : 1.4; // 그림자 160%, 균형 140%
+            double maxRatio = "shade".equals(routeType) ? 1.3 : 1.25;
 
             if (distanceRatio > maxRatio) {
                 logger.debug("거리 비율 초과: {}% > {}%", (int)(distanceRatio * 100), (int)(maxRatio * 100));
@@ -482,7 +487,7 @@ public class RouteCandidateService {
 
                 // 각 방향으로 경유지 생성
                 for (Double direction : strategicDirections) {
-                    RoutePoint waypoint = createWaypointAtDirection(midLat, midLng, direction, 50.0); // 50m
+                    RoutePoint waypoint = createWaypointAtDirection(midLat, midLng, direction, 15.0);
                     if (waypoint != null) {
                         waypoints.add(waypoint);
                     }
@@ -505,7 +510,7 @@ public class RouteCandidateService {
 
         try {
             // 좌우로 균등하게 분포
-            double[] distances = {30.0, 60.0, 90.0};
+            double[] distances = {15.0, 30.0, 45.0};
             double[] ratios = {0.3, 0.5, 0.7};
 
             for (double ratio : ratios) {
@@ -923,14 +928,14 @@ public class RouteCandidateService {
             // 1. 기본 우회 비율 검증
             double totalViaWaypoint = distanceToWaypoint + waypointToEnd;
             double detourRatio = totalViaWaypoint / directDistance;
-            if (detourRatio > 1.12) { // 115% → 112%로 더 엄격하게
-                logger.debug("기본 우회 비율 과다: {}% > 112%", (int)(detourRatio * 100));
+            if (detourRatio > 1.1) {
+                logger.debug("기본 우회 비율 과다: {}% > 110%", (int)(detourRatio * 100));
                 return false;
             }
 
             // 2. 목적지 접근도 검증
             double approachRatio = waypointToEnd / directDistance;
-            if (approachRatio > 0.75) {
+            if (approachRatio > 0.6) {
                 logger.debug("목적지 접근 부족: {}% 남음", (int)(approachRatio * 100));
                 return false;
             }
@@ -941,8 +946,8 @@ public class RouteCandidateService {
             double bearingDiff = Math.abs(startToWaypointBearing - startToEndBearing);
             if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
 
-            if (bearingDiff > 60) { // 75도 → 60도
-                logger.debug("방향 편차 과다: {}도 > 60도", (int)bearingDiff);
+            if (bearingDiff > 45) {
+                logger.debug("방향 편차 과다: {}도 > 45도", (int)bearingDiff);
                 return false;
             }
 
