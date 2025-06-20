@@ -78,9 +78,6 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     private Map<String, TMapPolygon> buildingPolygons = new HashMap<>();
     private Map<String, TMapPolygon> shadowPolygons = new HashMap<>();
     private LocalDateTime selectedDateTime = LocalDateTime.now();
-    private boolean avoidShadow = true;  // 기본값: 그림자 회피
-
-    private boolean isInitialRouteDisplay = true;
 
     private List<RouteCandidate> routeCandidates = new ArrayList<>();
     private RouteCandidate selectedCandidate;
@@ -830,7 +827,7 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
                     Log.d(TAG, "시간 변경됨: " + selectedDateTime + " (" + selectedDateTime.getHour() + "시)");
 
-                    // 🔄 시간 변경 시 즉시 새 경로 계산
+                    // 시간 변경 시 즉시 새 경로 계산
                     if (currentLocation != null && destinationPoint != null) {
                         Toast.makeText(MapActivity.this,
                                 "선택한 시간(" + selectedDateTime.getHour() + "시)의 그림자를 계산 중...",
@@ -903,9 +900,6 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         }
     }
 
-    /**
-     * clearAllRoutes 메서드 수정 - shadowSegments 추가 처리
-     */
     private void clearAllRoutes() {
         Log.d(TAG, "모든 경로 및 오버레이 제거");
 

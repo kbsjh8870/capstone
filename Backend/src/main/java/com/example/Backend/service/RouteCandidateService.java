@@ -519,38 +519,49 @@ public class RouteCandidateService {
         try {
             // 그림자 영역들의 중심점 계산
             List<RoutePoint> shadowCenters = calculateShadowCenters(shadowAreas);
-
             if (shadowCenters.isEmpty()) {
                 return waypoints;
             }
 
-            // 경로 상에서 그림자 영역에 가장 가까운 지점들을 경유지로 선택
+            RoutePoint startPoint = new RoutePoint(startLat, startLng);
+            RoutePoint endPoint = new RoutePoint(endLat, endLng);
             RoutePoint midPoint = new RoutePoint((startLat + endLat) / 2, (startLng + endLng) / 2);
+
+            // 목적지 방향 계산
+            double destinationDirection = calculateBearing(startPoint, endPoint);
 
             // 중간지점에서 가장 가까운 그림자 영역 찾기
             RoutePoint closestShadowCenter = findClosestShadowCenter(midPoint, shadowCenters);
 
             if (closestShadowCenter != null) {
-                // 그림자 중심으로 조금 더 가까이 이동한 경유지 생성
-                double shadowDirection = Math.atan2(
-                        closestShadowCenter.getLng() - midPoint.getLng(),
-                        closestShadowCenter.getLat() - midPoint.getLat()
-                );
+                // 그림자 방향 계산
+                double shadowDirection = calculateBearing(midPoint, closestShadowCenter);
 
-                // 그림자 쪽으로 100m 정도 이동한 지점
-                double waypointLat = midPoint.getLat() + Math.cos(shadowDirection) * 0.0009; // 약 100m
-                double waypointLng = midPoint.getLng() + Math.sin(shadowDirection) * 0.0009;
+                // 목적지 방향 제약 적용
+                double constrainedDirection = constrainDirectionToDestination(
+                        shadowDirection, destinationDirection);
 
-                waypoints.add(new RoutePoint(waypointLat, waypointLng));
+                // 제약된 방향으로 경유지 생성
+                double distance = 0.0003; // 약 30m
+                double directionRad = Math.toRadians(constrainedDirection);
 
-                logger.debug("그림자 타겟 경유지 생성: ({}, {}) → 그림자 중심까지 {}m",
-                        waypointLat, waypointLng,
-                        calculateDistance(waypointLat, waypointLng,
-                                closestShadowCenter.getLat(), closestShadowCenter.getLng()));
+                double waypointLat = midPoint.getLat() + Math.cos(directionRad) * distance;
+                double waypointLng = midPoint.getLng() + Math.sin(directionRad) * distance;
+
+                RoutePoint candidateWaypoint = new RoutePoint(waypointLat, waypointLng);
+
+                // 진행성 검증
+                if (isWaypointProgressive(startPoint, candidateWaypoint, endPoint)) {
+                    waypoints.add(candidateWaypoint);
+                    logger.debug("제약된 그림자 경유지 생성: 원래방향={}도, 제약방향={}도",
+                            shadowDirection, constrainedDirection);
+                } else {
+                    logger.debug("그림자 경유지 진행성 검증 실패");
+                }
             }
 
         } catch (Exception e) {
-            logger.error("그림자 타겟 경유지 생성 오류: " + e.getMessage(), e);
+            logger.error("제약된 그림자 경유지 생성 오류: " + e.getMessage(), e);
         }
 
         return waypoints;
@@ -567,35 +578,150 @@ public class RouteCandidateService {
             List<RoutePoint> basePoints = baseRoute.getPoints();
             if (basePoints.size() < 10) return waypoints;
 
-            // 균형을 위한 고정 시드 (타입별로 다르게)
+            RoutePoint startPoint = new RoutePoint(startLat, startLng);
+            RoutePoint endPoint = new RoutePoint(endLat, endLng);
+
+            // ⭐ 목적지 방향 계산
+            double destinationDirection = calculateBearing(startPoint, endPoint);
+
+            // 균형을 위한 고정 시드
             long balancedSeed = generateConsistentSeed(startLat, startLng, endLat, endLng) + 2000;
             Random random = new Random(balancedSeed);
 
-            // 경로의 1/3, 2/3 지점에서 적당한 우회
+            // 경로의 1/3, 2/3 지점에서 제약된 우회
             int oneThirdIndex = basePoints.size() / 3;
             int twoThirdIndex = (basePoints.size() * 2) / 3;
 
             for (int index : Arrays.asList(oneThirdIndex, twoThirdIndex)) {
                 RoutePoint basePoint = basePoints.get(index);
 
-                // (50-100m 범위)
-                double offsetDistance = 0.0005 + random.nextDouble() * 0.0005; // 50-100m
-                double offsetDirection = random.nextDouble() * 2 * Math.PI;
+                // 랜덤 방향 생성 (0-360도)
+                double randomDirection = random.nextDouble() * 360;
 
-                double waypointLat = basePoint.getLat() + Math.cos(offsetDirection) * offsetDistance;
-                double waypointLng = basePoint.getLng() + Math.sin(offsetDirection) * offsetDistance;
+                // 목적지 방향 제약 적용
+                double constrainedDirection = constrainDirectionToDestination(
+                        randomDirection, destinationDirection);
 
-                waypoints.add(new RoutePoint(waypointLat, waypointLng));
+                // 제약된 방향으로 경유지 생성 (거리 단축)
+                double offsetDistance = 0.0002; // 약 20m
+                double directionRad = Math.toRadians(constrainedDirection);
 
-                logger.debug("균형 경유지 생성: ({}, {}) - 기준점에서 {}m 이격",
-                        waypointLat, waypointLng, offsetDistance * 111000);
+                double waypointLat = basePoint.getLat() + Math.cos(directionRad) * offsetDistance;
+                double waypointLng = basePoint.getLng() + Math.sin(directionRad) * offsetDistance;
+
+                RoutePoint candidateWaypoint = new RoutePoint(waypointLat, waypointLng);
+
+                // 진행성 검증
+                if (isWaypointProgressive(startPoint, candidateWaypoint, endPoint)) {
+                    waypoints.add(candidateWaypoint);
+                    logger.debug("제약된 균형 경유지 생성: 원래방향={}도, 제약방향={}도",
+                            randomDirection, constrainedDirection);
+                } else {
+                    logger.debug("균형 경유지 진행성 검증 실패");
+                }
             }
 
         } catch (Exception e) {
-            logger.error("균형 경유지 생성 오류: " + e.getMessage(), e);
+            logger.error("제약된 균형 경유지 생성 오류: " + e.getMessage(), e);
         }
 
         return waypoints;
+    }
+
+    /**
+     * 목적지 방향을 고려하여 경유지 방향 제약
+     */
+    private double constrainDirectionToDestination(double preferredDirection, double destinationDirection) {
+        try {
+            // 목적지 방향 ±120도 범위 내에서만 경유지 설정 허용
+            double maxAngleDiff = 120.0;
+
+            // 두 방향 간의 각도 차이 계산
+            double angleDiff = Math.abs(preferredDirection - destinationDirection);
+            if (angleDiff > 180) {
+                angleDiff = 360 - angleDiff;
+            }
+
+            // 각도 차이가 허용 범위 내면 그대로 사용
+            if (angleDiff <= maxAngleDiff) {
+                return preferredDirection;
+            }
+
+            // 허용 범위를 벗어나면 가장 가까운 허용 방향으로 조정
+            double constrainedDirection;
+            if (preferredDirection > destinationDirection) {
+                if (preferredDirection - destinationDirection <= 180) {
+                    constrainedDirection = (destinationDirection + maxAngleDiff) % 360;
+                } else {
+                    constrainedDirection = (destinationDirection - maxAngleDiff + 360) % 360;
+                }
+            } else {
+                if (destinationDirection - preferredDirection <= 180) {
+                    constrainedDirection = (destinationDirection - maxAngleDiff + 360) % 360;
+                } else {
+                    constrainedDirection = (destinationDirection + maxAngleDiff) % 360;
+                }
+            }
+
+            return constrainedDirection;
+
+        } catch (Exception e) {
+            logger.error("방향 제약 계산 오류: " + e.getMessage(), e);
+            return destinationDirection;
+        }
+    }
+
+    /**
+     * 방위각 계산 (북쪽 기준 0-360도)
+     */
+    private double calculateBearing(RoutePoint from, RoutePoint to) {
+        double deltaLng = Math.toRadians(to.getLng() - from.getLng());
+        double fromLat = Math.toRadians(from.getLat());
+        double toLat = Math.toRadians(to.getLat());
+
+        double y = Math.sin(deltaLng) * Math.cos(toLat);
+        double x = Math.cos(fromLat) * Math.sin(toLat) -
+                Math.sin(fromLat) * Math.cos(toLat) * Math.cos(deltaLng);
+
+        double bearing = Math.toDegrees(Math.atan2(y, x));
+        return (bearing + 360) % 360;
+    }
+
+    /**
+     * 경유지가 목적지 방향으로 진행하는지 검증
+     */
+    private boolean isWaypointProgressive(RoutePoint start, RoutePoint waypoint, RoutePoint end) {
+        try {
+            double distanceToWaypoint = calculateDistance(
+                    start.getLat(), start.getLng(),
+                    waypoint.getLat(), waypoint.getLng());
+
+            double directDistance = calculateDistance(
+                    start.getLat(), start.getLng(),
+                    end.getLat(), end.getLng());
+
+            double waypointToEnd = calculateDistance(
+                    waypoint.getLat(), waypoint.getLng(),
+                    end.getLat(), end.getLng());
+
+            // 경유지를 거친 총 거리가 직선 거리의 140% 이하여야 함
+            double totalViaWaypoint = distanceToWaypoint + waypointToEnd;
+            double detourRatio = totalViaWaypoint / directDistance;
+            if (detourRatio > 1.4) {
+                return false;
+            }
+
+            // 경유지가 출발지보다 목적지에 더 가까워야 함
+            if (waypointToEnd >= directDistance * 0.9) { // 90% 이상 가까워져야 함
+                return false;
+            }
+
+            return true;
+
+        } catch (Exception e) {
+            logger.error("경유지 진행성 검증 오류: " + e.getMessage(), e);
+            return false;
+        }
     }
 
     /**
