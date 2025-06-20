@@ -920,43 +920,55 @@ public class RouteCandidateService {
                     waypoint.getLat(), waypoint.getLng(),
                     end.getLat(), end.getLng());
 
-            // 우회 비율 검증
+            // 1. 기본 우회 비율 검증
             double totalViaWaypoint = distanceToWaypoint + waypointToEnd;
             double detourRatio = totalViaWaypoint / directDistance;
-            if (detourRatio > 1.15) {
-                logger.debug("우회 비율 과다: {}% > 115%", (int)(detourRatio * 100));
+            if (detourRatio > 1.12) { // 115% → 112%로 더 엄격하게
+                logger.debug("기본 우회 비율 과다: {}% > 112%", (int)(detourRatio * 100));
                 return false;
             }
 
-            // 목적지 접근도 검증
+            // 2. 목적지 접근도 검증
             double approachRatio = waypointToEnd / directDistance;
             if (approachRatio > 0.75) {
                 logger.debug("목적지 접근 부족: {}% 남음", (int)(approachRatio * 100));
                 return false;
             }
 
-            // 방향 일치도 검증
+            // 3. 방향 일치도 검증
             double startToWaypointBearing = calculateBearing(start, waypoint);
             double startToEndBearing = calculateBearing(start, end);
             double bearingDiff = Math.abs(startToWaypointBearing - startToEndBearing);
             if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
 
-            if (bearingDiff > 75) {
-                logger.debug("방향 편차 과다: {}도 > 75도", (int)bearingDiff);
+            if (bearingDiff > 60) { // 75도 → 60도
+                logger.debug("방향 편차 과다: {}도 > 60도", (int)bearingDiff);
                 return false;
             }
 
-            // 경유지가 출발-목적지 직선을 기준으로 너무 멀리 벗어나지 않는지 검증
+            // 4. 과도한 측면 우회 감지
+            if (hasExcessiveLateralDetour(start, waypoint, end, directDistance)) {
+                logger.debug("과도한 측면 우회 감지");
+                return false;
+            }
+
+            // 5. 불필요한 큰 우회 감지
+            if (hasUnnecessaryLargeDetour(start, waypoint, end, directDistance)) {
+                logger.debug("불필요한 큰 우회 감지");
+                return false;
+            }
+
+            // 6. 직선 이탈 검증
             double perpDistance = calculatePointToLineDistance(waypoint, start, end);
-            double maxPerpDistance = directDistance * 0.25; // 직선거리의 25% 이내
+            double maxPerpDistance = directDistance * 0.18; // 25% → 18%
             if (perpDistance > maxPerpDistance) {
                 logger.debug("직선 이탈 과다: {}m > {}m", (int)perpDistance, (int)maxPerpDistance);
                 return false;
             }
 
-            // 경유지가 출발지나 목적지에 너무 가깝지 않은지 검증
-            double minDistanceFromStart = directDistance * 0.15; // 직선거리의 15% 이상
-            double minDistanceFromEnd = directDistance * 0.15;   // 직선거리의 15% 이상
+            // 7. 경유지가 출발지나 목적지에 너무 가깝지 않은지 검증
+            double minDistanceFromStart = directDistance * 0.15;
+            double minDistanceFromEnd = directDistance * 0.15;
 
             if (distanceToWaypoint < minDistanceFromStart) {
                 logger.debug("출발지에 너무 가까움: {}m < {}m", (int)distanceToWaypoint, (int)minDistanceFromStart);
@@ -968,13 +980,13 @@ public class RouteCandidateService {
                 return false;
             }
 
-            // 경유지가 실제로 목적지 방향으로 전진하는지
+            // 8. 벡터 진행성 검증
             if (!isActuallyProgressing(start, waypoint, end)) {
                 logger.debug("목적지 방향 전진 실패");
                 return false;
             }
 
-            logger.debug("✅ 경유지 검증 통과: 우회={}%, 접근={}%, 방향차이={}도, 직선이탈={}m",
+            logger.debug("경유지 검증 통과: 우회={}%, 접근={}%, 방향차이={}도, 직선이탈={}m",
                     (int)(detourRatio * 100),
                     (int)((1 - approachRatio) * 100),
                     (int)bearingDiff,
@@ -1630,5 +1642,80 @@ public class RouteCandidateService {
         }
         
         return minDistance;
+    }
+
+    /**
+     * 과도한 측면 우회 감지 (목적지 방향이지만 너무 측면으로 우회)
+     */
+    private boolean hasExcessiveLateralDetour(RoutePoint start, RoutePoint waypoint, RoutePoint end, double directDistance) {
+        try {
+            // 직선에서의 수직 거리 계산
+            double lateralDistance = calculatePointToLineDistance(waypoint, start, end);
+            
+            // 경유지까지의 거리
+            double waypointDistance = calculateDistance(start.getLat(), start.getLng(), 
+                                                       waypoint.getLat(), waypoint.getLng());
+            
+            // 측면 우회 비율 = 수직거리 / 경유지거리
+            double lateralRatio = waypointDistance > 0 ? lateralDistance / waypointDistance : 0;
+            
+            // 또한 직선거리 대비 측면 우회
+            double lateralToDirectRatio = lateralDistance / directDistance;
+            
+            // 너무 측면으로 많이 우회하는 경우
+            if (lateralRatio > 0.7 && lateralToDirectRatio > 0.12) { // 70% 이상 측면 + 직선거리의 12% 이상
+                logger.debug("과도한 측면 우회: 측면비율={}%, 직선대비={}%", 
+                    (int)(lateralRatio * 100), (int)(lateralToDirectRatio * 100));
+                return true;
+            }
+            
+            return false;
+            
+        } catch (Exception e) {
+            logger.error("측면 우회 감지 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+    
+    /**
+     * 불필요한 큰 우회 감지 (목적지 방향이지만 불필요하게 너무 크게 우회)
+     */
+    private boolean hasUnnecessaryLargeDetour(RoutePoint start, RoutePoint waypoint, RoutePoint end, double directDistance) {
+        try {
+            // 1. 전체 우회 거리 계산
+            double waypointDistance = calculateDistance(start.getLat(), start.getLng(), 
+                                                       waypoint.getLat(), waypoint.getLng());
+            double waypointToEnd = calculateDistance(waypoint.getLat(), waypoint.getLng(), 
+                                                    end.getLat(), end.getLng());
+            double totalViaWaypoint = waypointDistance + waypointToEnd;
+            double detourDistance = totalViaWaypoint - directDistance;
+            
+            // 2. 우회 거리가 직선거리의 일정 비율 이상이면 불필요한 큰 우회
+            double detourRatio = detourDistance / directDistance;
+            
+            // 3. 경유지가 직선에서 너무 멀리 떨어진 경우 + 우회거리가 큰 경우
+            double lateralDistance = calculatePointToLineDistance(waypoint, start, end);
+            double lateralRatio = lateralDistance / directDistance;
+            
+            // 측면 이탈이 15% 이상 && 우회거리가 8% 이상
+            if (lateralRatio > 0.15 && detourRatio > 0.08) {
+                logger.debug("불필요한 큰 우회: 측면이탈={}%, 우회거리={}%", 
+                    (int)(lateralRatio * 100), (int)(detourRatio * 100));
+                return true;
+            }
+            
+            // 4. 절대적인 우회 거리가 너무 큰 경우 (200m 이상)
+            if (detourDistance > 200 && directDistance < 2000) { // 2km 내 경로에서 200m 이상 우회
+                logger.debug("절대적 우회거리 과다: {}m 우회 (직선: {}m)", 
+                    (int)detourDistance, (int)directDistance);
+                return true;
+            }
+            
+            return false;
+            
+        } catch (Exception e) {
+            logger.error("큰 우회 감지 오류: " + e.getMessage(), e);
+            return false;
+        }
     }
 }
