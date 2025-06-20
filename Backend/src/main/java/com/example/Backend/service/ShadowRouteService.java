@@ -479,10 +479,10 @@ public class ShadowRouteService {
         try {
             logger.debug("=== 경로 품질 검증 시작 ===");
 
-            // 1. 거리 비율 검증 (150% 이하로 제한 강화)
+            // 1. 거리 비율 검증 (150% 이하로 제한)
             double distanceRatio = shadowRoute.getDistance() / baseRoute.getDistance();
             if (distanceRatio > 1.5) {
-                logger.debug("❌ 거리 초과: 기본={}m, 생성={}m ({}% 증가, 허용: 150%)",
+                logger.debug("X 거리 초과: 기본={}m, 생성={}m ({}% 증가, 허용: 150%)",
                         (int)baseRoute.getDistance(), (int)shadowRoute.getDistance(),
                         (int)((distanceRatio - 1) * 100));
                 return false;
