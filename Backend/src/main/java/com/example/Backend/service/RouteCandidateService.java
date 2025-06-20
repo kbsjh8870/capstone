@@ -1326,6 +1326,58 @@ public class RouteCandidateService {
     }
 
     /**
+     * 이상한 우회 패턴 감지 (기준 경로 대비)
+     */
+    private boolean isAbnormalRoute(Route waypointRoute, Route baseRoute) {
+        try {
+            if (waypointRoute == null || baseRoute == null || 
+                waypointRoute.getPoints().isEmpty() || baseRoute.getPoints().isEmpty()) {
+                return true;
+            }
+
+            List<RoutePoint> waypointPoints = waypointRoute.getPoints();
+            List<RoutePoint> basePoints = baseRoute.getPoints();
+
+            // 1. 극단적인 거리 증가 검사 (250% 이상)
+            double distanceRatio = waypointRoute.getDistance() / baseRoute.getDistance();
+            if (distanceRatio > 2.5) {
+                logger.debug("거리 비율 극단적 증가: {}% > 250%", (int)(distanceRatio * 100));
+                return true;
+            }
+
+            // 2. 급격한 방향 변화 패턴 감지
+            if (hasExcessiveDirectionChanges(waypointPoints)) {
+                logger.debug("급격한 방향 변화 패턴 감지");
+                return true;
+            }
+
+            // 3. 목적지 반대 방향으로 과도하게 이동하는 구간 검사
+            if (hasExcessiveBackwardMovement(waypointPoints)) {
+                logger.debug("목적지 반대 방향 과도한 이동 감지");
+                return true;
+            }
+
+            // 4. 지그재그 패턴 감지
+            if (hasZigzagPattern(waypointPoints)) {
+                logger.debug("지그재그 패턴 감지");
+                return true;
+            }
+
+            // 5. 기준 경로 대비 비정상적인 우회 패턴
+            if (hasAbnormalDetourPattern(waypointPoints, basePoints)) {
+                logger.debug("비정상적인 우회 패턴 감지");
+                return true;
+            }
+
+            return false;
+
+        } catch (Exception e) {
+            logger.error("이상 경로 패턴 감지 오류: " + e.getMessage(), e);
+            return false; // 오류 시 허용
+        }
+    }
+
+    /**
      * 밤이거나 날씨가 나쁠 때: 최단경로만 3개 반환
      */
     private List<RouteCandidate> generateShortestRouteOnly(
@@ -1366,5 +1418,217 @@ public class RouteCandidateService {
 
             return emergencyCandidates;
         }
+    }
+
+    /**
+     * 급격한 방향 변화 감지 (연속된 구간에서 120도 이상 변화)
+     */
+    private boolean hasExcessiveDirectionChanges(List<RoutePoint> points) {
+        try {
+            if (points.size() < 3) return false;
+
+            int excessiveChanges = 0;
+            final double MAX_DIRECTION_CHANGE = 120.0; // 120도
+            final int MAX_ALLOWED_CHANGES = 2; // 최대 2번까지 허용
+
+            // 10개 포인트마다 샘플링하여 방향 변화 체크
+            int stepSize = Math.max(1, points.size() / 15);
+            
+            for (int i = 0; i < points.size() - 2 * stepSize; i += stepSize) {
+                RoutePoint p1 = points.get(i);
+                RoutePoint p2 = points.get(i + stepSize);
+                RoutePoint p3 = points.get(i + 2 * stepSize);
+
+                double bearing1 = calculateBearing(p1, p2);
+                double bearing2 = calculateBearing(p2, p3);
+
+                double angleDiff = Math.abs(bearing2 - bearing1);
+                if (angleDiff > 180) {
+                    angleDiff = 360 - angleDiff;
+                }
+
+                if (angleDiff > MAX_DIRECTION_CHANGE) {
+                    excessiveChanges++;
+                    logger.debug("급격한 방향 변화 감지: {}도 변화", (int)angleDiff);
+                }
+            }
+
+            return excessiveChanges > MAX_ALLOWED_CHANGES;
+
+        } catch (Exception e) {
+            logger.error("방향 변화 감지 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 목적지 반대 방향 과도한 이동 감지
+     */
+    private boolean hasExcessiveBackwardMovement(List<RoutePoint> points) {
+        try {
+            if (points.size() < 3) return false;
+
+            RoutePoint start = points.get(0);
+            RoutePoint end = points.get(points.size() - 1);
+            double targetDirection = calculateBearing(start, end);
+
+            double totalDistance = 0;
+            double backwardDistance = 0;
+
+            // 구간별로 목적지 방향과 반대로 가는 거리 계산
+            for (int i = 0; i < points.size() - 1; i++) {
+                RoutePoint current = points.get(i);
+                RoutePoint next = points.get(i + 1);
+
+                double segmentDistance = calculateDistance(
+                    current.getLat(), current.getLng(), 
+                    next.getLat(), next.getLng());
+                
+                double segmentDirection = calculateBearing(current, next);
+                double directionDiff = Math.abs(segmentDirection - targetDirection);
+                if (directionDiff > 180) {
+                    directionDiff = 360 - directionDiff;
+                }
+
+                totalDistance += segmentDistance;
+
+                // 목적지 방향과 120도 이상 차이나면 반대 방향
+                if (directionDiff > 120) {
+                    backwardDistance += segmentDistance;
+                }
+            }
+
+            double backwardRatio = totalDistance > 0 ? backwardDistance / totalDistance : 0;
+            final double MAX_BACKWARD_RATIO = 0.3; // 30%
+
+            if (backwardRatio > MAX_BACKWARD_RATIO) {
+                logger.debug("목적지 반대 방향 이동 과다: {}% > 30%", (int)(backwardRatio * 100));
+                return true;
+            }
+
+            return false;
+
+        } catch (Exception e) {
+            logger.error("반대 방향 이동 감지 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 지그재그 패턴 감지 (방향이 자주 바뀌는 패턴)
+     */
+    private boolean hasZigzagPattern(List<RoutePoint> points) {
+        try {
+            if (points.size() < 4) return false;
+
+            int directionChanges = 0;
+            final double MIN_DIRECTION_CHANGE = 45.0; // 45도 이상 변화
+            final int MAX_ALLOWED_ZIGZAG = 4; // 최대 4번 지그재그 허용
+
+            // 방향 변화 횟수 카운트
+            for (int i = 0; i < points.size() - 2; i++) {
+                RoutePoint p1 = points.get(i);
+                RoutePoint p2 = points.get(i + 1);
+                RoutePoint p3 = points.get(i + 2);
+
+                double bearing1 = calculateBearing(p1, p2);
+                double bearing2 = calculateBearing(p2, p3);
+
+                double angleDiff = Math.abs(bearing2 - bearing1);
+                if (angleDiff > 180) {
+                    angleDiff = 360 - angleDiff;
+                }
+
+                if (angleDiff > MIN_DIRECTION_CHANGE) {
+                    directionChanges++;
+                }
+            }
+
+            if (directionChanges > MAX_ALLOWED_ZIGZAG) {
+                logger.debug("지그재그 패턴 감지: {}번 방향 변화 > {}번", directionChanges, MAX_ALLOWED_ZIGZAG);
+                return true;
+            }
+
+            return false;
+
+        } catch (Exception e) {
+            logger.error("지그재그 패턴 감지 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 기준 경로 대비 비정상적인 우회 패턴 감지
+     */
+    private boolean hasAbnormalDetourPattern(List<RoutePoint> waypointPoints, List<RoutePoint> basePoints) {
+        try {
+            if (waypointPoints.size() < 3 || basePoints.size() < 3) return false;
+
+            RoutePoint start = waypointPoints.get(0);
+            RoutePoint end = waypointPoints.get(waypointPoints.size() - 1);
+            double directDistance = calculateDistance(start.getLat(), start.getLng(), end.getLat(), end.getLng());
+
+            // 기준 경로의 "핵심 경로 영역" 계산
+            List<RoutePoint> coreBasePoints = getCoreRoutePoints(basePoints);
+
+            // 경유지 경로가 기준 경로에서 너무 멀리 벗어나는 구간 계산
+            double maxDeviationDistance = 0;
+            int deviatingSegments = 0;
+            final double MAX_DEVIATION_RATIO = 0.4; // 직선거리의 40%
+            final int MAX_DEVIATING_SEGMENTS = (int)(waypointPoints.size() * 0.3); // 전체의 30%
+
+            for (RoutePoint waypointPoint : waypointPoints) {
+                double minDistanceToBaseLine = findMinDistanceToRouteLine(waypointPoint, coreBasePoints);
+                double deviationRatio = minDistanceToBaseLine / directDistance;
+
+                if (deviationRatio > MAX_DEVIATION_RATIO) {
+                    deviatingSegments++;
+                    maxDeviationDistance = Math.max(maxDeviationDistance, minDistanceToBaseLine);
+                }
+            }
+
+            if (deviatingSegments > MAX_DEVIATING_SEGMENTS) {
+                logger.debug("기준 경로 대비 과도한 이탈: {}개 구간 > {}개, 최대이탈거리 {}m", 
+                    deviatingSegments, MAX_DEVIATING_SEGMENTS, (int)maxDeviationDistance);
+                return true;
+            }
+
+            return false;
+
+        } catch (Exception e) {
+            logger.error("비정상 우회 패턴 감지 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 기준 경로의 핵심 구간 추출 (처음과 끝 제외한 중간 부분)
+     */
+    private List<RoutePoint> getCoreRoutePoints(List<RoutePoint> basePoints) {
+        if (basePoints.size() <= 4) {
+            return basePoints;
+        }
+        
+        int startIndex = basePoints.size() / 6; // 처음 1/6 제외
+        int endIndex = basePoints.size() - basePoints.size() / 6; // 마지막 1/6 제외
+        
+        return basePoints.subList(startIndex, endIndex);
+    }
+
+    /**
+     * 점에서 경로 라인까지의 최소 거리 계산
+     */
+    private double findMinDistanceToRouteLine(RoutePoint point, List<RoutePoint> routePoints) {
+        double minDistance = Double.MAX_VALUE;
+        
+        for (int i = 0; i < routePoints.size() - 1; i++) {
+            RoutePoint lineStart = routePoints.get(i);
+            RoutePoint lineEnd = routePoints.get(i + 1);
+            
+            double distance = calculatePointToLineDistance(point, lineStart, lineEnd);
+            minDistance = Math.min(minDistance, distance);
+        }
+        
+        return minDistance;
     }
 }
