@@ -117,7 +117,7 @@ public class RouteCandidateService {
                     logger.info("그림자경로: {}m, {}분, 그늘 {}%",
                             (int)shadeRoute.getDistance(), shadeRoute.getDuration(), shadeRoute.getShadowPercentage());
                 } else {
-                    logger.info("그림자경로: 품질 기준 미달로 제외");
+                    logger.info("그림자경로: 품질 기준 미달, 제외");
                     // 생성 불가 후보 추가
                     candidates.add(createUnavailableCandidate("shade", "그늘이 많은경로", "품질 기준 미달"));
                 }
@@ -848,8 +848,8 @@ public class RouteCandidateService {
      */
     private double constrainDirectionToDestination(double preferredDirection, double destinationDirection) {
         try {
-            // 목적지 방향 ±75도 범위 내에서만 경유지 설정 허용
-            double maxAngleDiff = 75.0;
+            // 목적지 방향 ±60도 범위 내에서만 경유지 설정 허용
+            double maxAngleDiff = 60.0;
 
             // 두 방향 간의 각도 차이 계산
             double angleDiff = Math.abs(preferredDirection - destinationDirection);
@@ -907,6 +907,7 @@ public class RouteCandidateService {
      */
     private boolean isWaypointProgressive(RoutePoint start, RoutePoint waypoint, RoutePoint end) {
         try {
+            // 기본 거리 계산
             double distanceToWaypoint = calculateDistance(
                     start.getLat(), start.getLng(),
                     waypoint.getLat(), waypoint.getLng());
@@ -919,31 +920,65 @@ public class RouteCandidateService {
                     waypoint.getLat(), waypoint.getLng(),
                     end.getLat(), end.getLng());
 
-            // 경유지를 거친 총 거리가 직선 거리의 120% 이하여야 함
+            // 우회 비율 검증
             double totalViaWaypoint = distanceToWaypoint + waypointToEnd;
             double detourRatio = totalViaWaypoint / directDistance;
-            if (detourRatio > 1.2) {
-                logger.debug("경유지 우회 비율 과다: {}% > 130%", (int)(detourRatio * 100));
+            if (detourRatio > 1.15) {
+                logger.debug("우회 비율 과다: {}% > 115%", (int)(detourRatio * 100));
                 return false;
             }
 
-            // 경유지가 출발지보다 목적지에 더 가까워야 함
-            if (waypointToEnd >= directDistance * 0.8) { // 80% 이상 가까워져야 함
-                logger.debug("경유지가 목적지 접근 부족: 경유지→목적지={}m, 직선거리={}m ({}%)",
-                        (int)waypointToEnd, (int)directDistance, (int)(waypointToEnd/directDistance*100));
+            // 목적지 접근도 검증
+            double approachRatio = waypointToEnd / directDistance;
+            if (approachRatio > 0.75) {
+                logger.debug("목적지 접근 부족: {}% 남음", (int)(approachRatio * 100));
                 return false;
             }
 
+            // 방향 일치도 검증
             double startToWaypointBearing = calculateBearing(start, waypoint);
             double startToEndBearing = calculateBearing(start, end);
             double bearingDiff = Math.abs(startToWaypointBearing - startToEndBearing);
             if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
 
-            if (bearingDiff > 90) { // 방향 차이가 90도 초과하면 거부
-                logger.debug("경유지 방향 편차 과다: {}도 > 90도", (int)bearingDiff);
+            if (bearingDiff > 75) {
+                logger.debug("방향 편차 과다: {}도 > 75도", (int)bearingDiff);
                 return false;
             }
 
+            // 경유지가 출발-목적지 직선을 기준으로 너무 멀리 벗어나지 않는지 검증
+            double perpDistance = calculatePointToLineDistance(waypoint, start, end);
+            double maxPerpDistance = directDistance * 0.25; // 직선거리의 25% 이내
+            if (perpDistance > maxPerpDistance) {
+                logger.debug("직선 이탈 과다: {}m > {}m", (int)perpDistance, (int)maxPerpDistance);
+                return false;
+            }
+
+            // 경유지가 출발지나 목적지에 너무 가깝지 않은지 검증
+            double minDistanceFromStart = directDistance * 0.15; // 직선거리의 15% 이상
+            double minDistanceFromEnd = directDistance * 0.15;   // 직선거리의 15% 이상
+
+            if (distanceToWaypoint < minDistanceFromStart) {
+                logger.debug("출발지에 너무 가까움: {}m < {}m", (int)distanceToWaypoint, (int)minDistanceFromStart);
+                return false;
+            }
+
+            if (waypointToEnd < minDistanceFromEnd) {
+                logger.debug("목적지에 너무 가까움: {}m < {}m", (int)waypointToEnd, (int)minDistanceFromEnd);
+                return false;
+            }
+
+            // 경유지가 실제로 목적지 방향으로 전진하는지
+            if (!isActuallyProgressing(start, waypoint, end)) {
+                logger.debug("목적지 방향 전진 실패");
+                return false;
+            }
+
+            logger.debug("✅ 경유지 검증 통과: 우회={}%, 접근={}%, 방향차이={}도, 직선이탈={}m",
+                    (int)(detourRatio * 100),
+                    (int)((1 - approachRatio) * 100),
+                    (int)bearingDiff,
+                    (int)perpDistance);
             return true;
 
         } catch (Exception e) {
@@ -951,6 +986,43 @@ public class RouteCandidateService {
             return false;
         }
     }
+
+    /**
+     *  실제로 목적지 방향으로 전진하는지 벡터 검증
+     */
+    private boolean isActuallyProgressing(RoutePoint start, RoutePoint waypoint, RoutePoint end) {
+        try {
+            // 출발지 → 목적지 벡터
+            double targetVectorLat = end.getLat() - start.getLat();
+            double targetVectorLng = end.getLng() - start.getLng();
+
+            // 출발지 → 경유지 벡터
+            double waypointVectorLat = waypoint.getLat() - start.getLat();
+            double waypointVectorLng = waypoint.getLng() - start.getLng();
+
+            // 벡터 내적 계산 (같은 방향이면 양수)
+            double dotProduct = targetVectorLat * waypointVectorLat + targetVectorLng * waypointVectorLng;
+
+            // 목적지 벡터의 크기 제곱
+            double targetMagnitudeSquared = targetVectorLat * targetVectorLat + targetVectorLng * targetVectorLng;
+
+            // 내적이 목적지 벡터 크기의 50% 이상이어야 함 (실제 전진)
+            double minDotProduct = targetMagnitudeSquared * 0.5;
+
+            boolean isProgressing = dotProduct >= minDotProduct;
+
+            if (!isProgressing) {
+                logger.debug("벡터 내적 검증 실패: {} < {}", dotProduct, minDotProduct);
+            }
+
+            return isProgressing;
+
+        } catch (Exception e) {
+            logger.error("벡터 전진 검증 오류: " + e.getMessage(), e);
+            return true; // 오류 시 허용
+        }
+    }
+
 
     /**
      * 그림자 영역들의 중심점 계산
