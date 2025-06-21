@@ -81,6 +81,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
 
     private List<RouteCandidate> routeCandidates = new ArrayList<>();
     private RouteCandidate selectedCandidate;
+    private LinearLayout routeInfoContainer;
+    private RadioGroup rgRouteSelection;
+    private boolean isUpdatingRadioButtons = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -113,6 +116,11 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         progressBar.setVisibility(View.GONE);
         tvRouteInfo.setVisibility(View.GONE);
         rvSearchResults.setVisibility(View.GONE);
+
+        routeInfoContainer = findViewById(R.id.route_info_container);
+        rgRouteSelection = findViewById(R.id.rg_route_selection);
+        rgRouteSelection.setOnCheckedChangeListener(this::onRouteButtonSelected);
+
     }
 
     /**
@@ -625,6 +633,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         // 기존 정렬 로직 그대로
         routeCandidates.sort((c1, c2) -> Integer.compare(c1.getPriority(), c2.getPriority()));
         showRouteSelectionDialog();
+        if (!routeCandidates.isEmpty()) {
+            displayRouteInfoWithButtons(routeCandidates.get(0));
+        }
     }
 
     /**
@@ -704,6 +715,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
                 tvRouteInfo.setText(candidate.getDescription()); // 폴백
             }
             tvRouteInfo.setVisibility(View.VISIBLE);
+
+            displayRouteInfoWithButtons(candidate);
+            updateSelectedRadioButton(candidate);
 
             if (!allPoints.isEmpty()) {
                 adjustMapView(allPoints);
@@ -953,11 +967,358 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             // UI 요소 숨기기
             tvRouteInfo.setVisibility(View.GONE);
 
+            clearRouteSelectionButtons();
+
             Log.d(TAG, "모든 경로 제거 완료");
         } catch (Exception e) {
             Log.e(TAG, "경로 제거 오류: " + e.getMessage(), e);
         }
     }
+
+    /**
+     * 경로 선택 라디오 버튼들 설정
+     */
+    private void setupRouteSelectionButtons() {
+        try {
+            Log.d(TAG, "회색바 라디오 버튼 설정 시작");
+
+            isUpdatingRadioButtons = true;
+
+            // 기존 라디오 버튼들 제거
+            rgRouteSelection.removeAllViews();
+
+            // 유효한 후보 경로들만 필터링
+            List<RouteCandidate> validCandidates = new ArrayList<>();
+            for (RouteCandidate candidate : routeCandidates) {
+                if (candidate.getRoute() != null &&
+                        candidate.getRoute().getPoints() != null &&
+                        !candidate.getRoute().getPoints().isEmpty()) {
+                    validCandidates.add(candidate);
+                }
+            }
+
+            if (validCandidates.isEmpty()) {
+                Log.d(TAG, "유효한 후보 경로가 없음");
+                isUpdatingRadioButtons = false;
+                return;
+            }
+
+            // 라디오 버튼 생성 (최대 3개)
+            for (int i = 0; i < Math.min(3, validCandidates.size()); i++) {
+                RouteCandidate candidate = validCandidates.get(i);
+
+                RadioButton radioButton = new RadioButton(this);
+                radioButton.setId(View.generateViewId());
+                radioButton.setText(String.valueOf(i + 1)); // 1, 2, 3 숫자 표시
+                radioButton.setTextSize(12);
+                radioButton.setTextColor(Color.WHITE);
+                radioButton.setPadding(8, 0, 8, 0);
+
+                // 라디오 버튼 크기 조정
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                );
+                params.setMargins(4, 0, 4, 0);
+                radioButton.setLayoutParams(params);
+
+                // 버튼 스타일 설정
+                radioButton.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.WHITE));
+                radioButton.setScaleX(0.8f);
+                radioButton.setScaleY(0.8f);
+
+                // 태그에 후보 인덱스 저장
+                int originalIndex = routeCandidates.indexOf(candidate);
+                radioButton.setTag(originalIndex);
+
+                rgRouteSelection.addView(radioButton);
+
+                // 첫 번째 항목을 기본 선택
+                if (i == 0) {
+                    radioButton.setChecked(true);
+                }
+
+                Log.d(TAG, "라디오 버튼 " + (i + 1) + " 생성: " + candidate.getDisplayName());
+            }
+            isUpdatingRadioButtons = false;
+
+            Log.d(TAG, "회색바 라디오 버튼 설정 완료: " + Math.min(3, validCandidates.size()) + "개");
+
+        } catch (Exception e) {
+            Log.e(TAG, "회색바 라디오 버튼 설정 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 라디오 버튼 선택 이벤트 처리
+     */
+    private void onRouteButtonSelected(RadioGroup group, int checkedId) {
+        try {
+            if (isUpdatingRadioButtons) {
+                Log.d(TAG, "라디오 버튼 업데이트 중이므로 이벤트 무시");
+                return;
+            }
+            if (checkedId == -1) return; // 선택 해제된 경우
+
+            RadioButton selectedButton = findViewById(checkedId);
+            if (selectedButton == null || selectedButton.getTag() == null) return;
+
+            int candidateIndex = (Integer) selectedButton.getTag();
+
+            if (candidateIndex >= 0 && candidateIndex < routeCandidates.size()) {
+                RouteCandidate selectedCandidate = routeCandidates.get(candidateIndex);
+
+                Log.d(TAG, "회색바 라디오 버튼으로 경로 선택: " + selectedCandidate.getDisplayName());
+
+                this.selectedCandidate = selectedCandidate;
+                displaySelectedRouteOnly(selectedCandidate);
+
+                // 선택 피드백
+                String buttonText = selectedButton.getText().toString();
+                Toast.makeText(this,
+                        buttonText + "번: " + selectedCandidate.getDisplayName(),
+                        Toast.LENGTH_SHORT).show();
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG, "회색바 라디오 버튼 선택 처리 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 경로만 표시 (라디오 버튼 업데이트 없이)
+     */
+    private void displaySelectedRouteOnly(RouteCandidate candidate) {
+        try {
+            // 기존 경로 제거
+            clearAllRoutesExceptButtons(); // 라디오 버튼은 유지하고 경로만 제거
+
+            Route route = candidate.getRoute();
+            if (route == null || route.getPoints().isEmpty()) {
+                Toast.makeText(this, "경로 데이터가 없습니다", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            TMapPolyLine polyLine = new TMapPolyLine();
+            polyLine.setID("selected_route");
+
+            int color = Color.parseColor(candidate.getColor());
+            polyLine.setLineColor(color);
+            polyLine.setLineWidth(6.0f);
+
+            List<TMapPoint> allPoints = new ArrayList<>();
+            for (RoutePoint point : route.getPoints()) {
+                TMapPoint tMapPoint = new TMapPoint(point.getLat(), point.getLng());
+                polyLine.addLinePoint(tMapPoint);
+                allPoints.add(tMapPoint);
+            }
+
+            tMapView.addTMapPolyLine(polyLine.getID(), polyLine);
+            routes.add(polyLine);
+
+            displayShadowSegmentsForRoute(route);
+
+            // 경로 정보 텍스트만 업데이트 (라디오 버튼은 그대로)
+            updateRouteInfoText(candidate);
+
+            if (!allPoints.isEmpty()) {
+                adjustMapView(allPoints);
+            }
+
+            Log.d(TAG, "경로만 표시 완료: " + candidate.getDisplayName());
+
+        } catch (Exception e) {
+            Log.e(TAG, "경로 표시 오류: " + e.getMessage(), e);
+            Toast.makeText(this, "경로 표시 중 오류가 발생했습니다", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * 경로 정보 텍스트만 업데이트
+     */
+    private void updateRouteInfoText(RouteCandidate candidate) {
+        try {
+            String routeDescription = candidate.getDetailedDescription();
+            if (routeDescription == null || routeDescription.isEmpty()) {
+                routeDescription = candidate.getDescription();
+            }
+
+            tvRouteInfo.setText(routeDescription);
+
+            Log.d(TAG, "경로 정보 텍스트 업데이트 완료");
+
+        } catch (Exception e) {
+            Log.e(TAG, "경로 정보 텍스트 업데이트 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 경로만 제거 (라디오 버튼은 유지)
+     */
+    private void clearAllRoutesExceptButtons() {
+        Log.d(TAG, "라디오 버튼 제외하고 경로만 제거");
+
+        try {
+            // TMapView의 모든 폴리라인 먼저 제거
+            tMapView.removeAllTMapPolyLine();
+
+            // 경로 목록 제거
+            for (TMapPolyLine route : routes) {
+                try {
+                    tMapView.removeTMapPolyLine(route.getID());
+                } catch (Exception e) {
+                    Log.e(TAG, "경로 제거 오류: " + e.getMessage());
+                }
+            }
+            routes.clear();
+
+            // 그림자 구간 오버레이 제거
+            for (TMapPolyLine shadowSegment : shadowSegments) {
+                try {
+                    tMapView.removeTMapPolyLine(shadowSegment.getID());
+                } catch (Exception e) {
+                    Log.e(TAG, "그림자 오버레이 제거 오류: " + e.getMessage());
+                }
+            }
+            shadowSegments.clear();
+
+            // 기존 경로 제거
+            if (currentRoute != null) {
+                tMapView.removeTMapPath();
+            }
+
+            // 그림자 영역 제거
+            for (String key : shadowPolygons.keySet()) {
+                tMapView.removeTMapPolygon(key);
+            }
+            shadowPolygons.clear();
+
+            // 건물 영역 제거
+            for (String key : buildingPolygons.keySet()) {
+                tMapView.removeTMapPolygon(key);
+            }
+            buildingPolygons.clear();
+
+            // 현재 경로 참조 제거
+            currentRoute = null;
+
+            Log.d(TAG, "라디오 버튼 제외한 경로 제거 완료");
+        } catch (Exception e) {
+            Log.e(TAG, "경로 제거 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 경로 정보 표시 (라디오 버튼 포함) - 초기 설정
+     */
+    private void displayRouteInfoWithButtons(RouteCandidate candidate) {
+        try {
+            if (candidate == null || candidate.getRoute() == null) {
+                routeInfoContainer.setVisibility(View.GONE);
+                return;
+            }
+
+            // 경로 정보 텍스트 설정
+            updateRouteInfoText(candidate);
+
+            // 라디오 버튼들 설정 (초기에만)
+            setupRouteSelectionButtons();
+
+            // 현재 선택된 경로에 해당하는 라디오 버튼 선택
+            updateSelectedRadioButtonSilently(candidate);
+
+            // 컨테이너 표시
+            routeInfoContainer.setVisibility(View.VISIBLE);
+
+            Log.d(TAG, "경로 정보와 라디오 버튼 표시 완료");
+
+        } catch (Exception e) {
+            Log.e(TAG, "경로 정보 표시 오류: " + e.getMessage(), e);
+            routeInfoContainer.setVisibility(View.GONE);
+        }
+    }
+
+    /**
+     * 선택된 경로에 해당하는 라디오 버튼 업데이트 (이벤트 발생 없이)
+     */
+    private void updateSelectedRadioButtonSilently(RouteCandidate candidate) {
+        try {
+            if (candidate == null || rgRouteSelection == null) return;
+
+            // 이벤트 발생 방지
+            isUpdatingRadioButtons = true;
+
+            int candidateIndex = routeCandidates.indexOf(candidate);
+
+            // 해당 인덱스를 태그로 가진 라디오 버튼 찾기
+            for (int i = 0; i < rgRouteSelection.getChildCount(); i++) {
+                View child = rgRouteSelection.getChildAt(i);
+                if (child instanceof RadioButton) {
+                    RadioButton radioButton = (RadioButton) child;
+                    if (radioButton.getTag() != null &&
+                            (Integer) radioButton.getTag() == candidateIndex) {
+                        radioButton.setChecked(true);
+                        break;
+                    }
+                }
+            }
+
+            // 플래그 해제
+            isUpdatingRadioButtons = false;
+
+        } catch (Exception e) {
+            Log.e(TAG, "라디오 버튼 상태 업데이트 오류: " + e.getMessage(), e);
+            isUpdatingRadioButtons = false; // 오류 시에도 플래그 해제
+        }
+    }
+
+    /**
+     * 선택된 경로에 해당하는 라디오 버튼 업데이트
+     */
+    private void updateSelectedRadioButton(RouteCandidate candidate) {
+        try {
+            if (candidate == null || rgRouteSelection == null) return;
+
+            int candidateIndex = routeCandidates.indexOf(candidate);
+
+            // 해당 인덱스를 태그로 가진 라디오 버튼 찾기
+            for (int i = 0; i < rgRouteSelection.getChildCount(); i++) {
+                View child = rgRouteSelection.getChildAt(i);
+                if (child instanceof RadioButton) {
+                    RadioButton radioButton = (RadioButton) child;
+                    if (radioButton.getTag() != null &&
+                            (Integer) radioButton.getTag() == candidateIndex) {
+                        radioButton.setChecked(true);
+                        break;
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG, "라디오 버튼 상태 업데이트 오류: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 라디오 버튼들 초기화
+     */
+    private void clearRouteSelectionButtons() {
+        try {
+            if (rgRouteSelection != null) {
+                isUpdatingRadioButtons = true; // 이벤트 방지
+                rgRouteSelection.removeAllViews();
+                isUpdatingRadioButtons = false;
+            }
+            if (routeInfoContainer != null) {
+                routeInfoContainer.setVisibility(View.GONE);
+            }
+            Log.d(TAG, "회색바 라디오 버튼 초기화 완료");
+        } catch (Exception e) {
+            Log.e(TAG, "회색바 라디오 버튼 초기화 오류: " + e.getMessage(), e);
+            isUpdatingRadioButtons = false;
+        }
+    }
+
 
     @Override
     protected void onResume() {
