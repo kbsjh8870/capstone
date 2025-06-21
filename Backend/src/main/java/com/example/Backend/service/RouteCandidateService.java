@@ -285,23 +285,30 @@ public class RouteCandidateService {
             RoutePoint endPoint = new RoutePoint(endLat, endLng);
             double destinationDirection = calculateBearing(startPoint, endPoint);
 
-            // 적응적 후보 개수 (거리에 따라)
+            // 거리별 경유지 개수
             int targetCandidates;
-            if (routeDistance < 500) {
-                targetCandidates = 8;   // 단거리: 8개
+            double maxDeviation; // 최대 우회 거리
+
+            if (routeDistance < 300) {
+                targetCandidates = 3;
+                maxDeviation = 40;
+            } else if (routeDistance < 500) {
+                targetCandidates = 5;
+                maxDeviation = 60;
             } else if (routeDistance < 1000) {
-                targetCandidates = 12;  // 중거리: 12개
-            } else if (routeDistance < 2000) {
-                targetCandidates = 15;  // 장거리: 15개
+                targetCandidates = 10;
+                maxDeviation = 100;
             } else {
-                targetCandidates = 18;  // 초장거리: 18개
+                targetCandidates = 15;
+                maxDeviation = 150;
             }
 
-            logger.debug("경로 거리 {}m → 목표 경유지 {}개", (int)routeDistance, targetCandidates);
+            logger.debug("경로 거리 {}m → 목표 경유지 {}개, 최대 우회 {}m", (int)routeDistance, targetCandidates, (int)maxDeviation);
 
             // 전략적 지점 (우선순위 높음)
-            candidates.addAll(generateStrategicWaypoints(startLat, startLng, endLat, endLng,
-                    destinationDirection, routeType, sunPos, shadowAreas));
+            candidates.addAll(generateStrategicWaypointsWithLimit(
+                    startLat, startLng, endLat, endLng, destinationDirection,
+                    routeType, sunPos, shadowAreas, maxDeviation));
 
             // 균등 분포 경유지
             if (candidates.size() < targetCandidates) {
@@ -447,54 +454,118 @@ public class RouteCandidateService {
     /**
      * 전략적 경유지 생성 (우선순위 높음)
      */
-    private List<RoutePoint> generateStrategicWaypoints(double startLat, double startLng, double endLat, double endLng,
-                                                        double destinationDirection, String routeType,
-                                                        SunPosition sunPos, List<ShadowArea> shadowAreas) {
+    private List<RoutePoint> generateStrategicWaypointsWithLimit(
+            double startLat, double startLng, double endLat, double endLng,
+            double destinationDirection, String routeType,
+            SunPosition sunPos, List<ShadowArea> shadowAreas, double maxDeviation) {
+
         List<RoutePoint> waypoints = new ArrayList<>();
+        double routeDistance = calculateDistance(startLat, startLng, endLat, endLng);
 
-        try {
-            // 경로의 핵심 지점들 (1/4, 1/2, 3/4)
-            double[] ratios = {0.25, 0.5, 0.75};
+        // 거리별로 다른 비율 적용
+        double[] ratios;
+        if (routeDistance < 500) {
+            ratios = new double[]{0.5};
+        } else if (routeDistance < 1000) {
+            ratios = new double[]{0.33, 0.67};
+        } else {
+            ratios = new double[]{0.25, 0.5, 0.75};
+        }
 
-            for (double ratio : ratios) {
-                double midLat = startLat + (endLat - startLat) * ratio;
-                double midLng = startLng + (endLng - startLng) * ratio;
+        for (double ratio : ratios) {
+            double midLat = startLat + (endLat - startLat) * ratio;
+            double midLng = startLng + (endLng - startLng) * ratio;
 
-                // 방향들
-                List<Double> strategicDirections = new ArrayList<>();
+            // 그림자 영역과의 거리 기반으로 경유지 생성
+            if ("shade".equals(routeType) && !shadowAreas.isEmpty()) {
+                // 가장 가까운 그림자 영역 찾기
+                RoutePoint nearestShadow = findNearestShadowPoint(midLat, midLng, shadowAreas);
+                if (nearestShadow != null) {
+                    double distanceToShadow = calculateDistance(midLat, midLng,
+                            nearestShadow.getLat(), nearestShadow.getLng());
 
-                if ("shade".equals(routeType)) {
-                    // 그림자 방향 (태양 반대)
-                    double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
-                    strategicDirections.add(constrainDirectionToDestination(shadowDirection, destinationDirection));
+                    // maxDeviation 이내에 있는 경우만 추가
+                    if (distanceToShadow <= maxDeviation) {
+                        // 그림자 방향으로 적절한 거리만큼 이동
+                        double moveDistance = Math.min(distanceToShadow, maxDeviation * 0.8);
+                        double bearing = calculateBearing(new RoutePoint(midLat, midLng), nearestShadow);
+                        RoutePoint waypoint = createWaypointAtDirection(midLat, midLng, bearing, moveDistance);
 
-                    // 가장 가까운 그림자 영역 방향
-                    RoutePoint nearestShadowDirection = findNearestShadowDirection(midLat, midLng, shadowAreas);
-                    if (nearestShadowDirection != null) {
-                        double shadowAreaDirection = calculateBearing(new RoutePoint(midLat, midLng), nearestShadowDirection);
-                        strategicDirections.add(constrainDirectionToDestination(shadowAreaDirection, destinationDirection));
+                        if (waypoint != null && isWaypointValid(waypoint, startLat, startLng, endLat, endLng, maxDeviation)) {
+                            waypoints.add(waypoint);
+                        }
                     }
-                } else {
-                    // 균형: 좌우 균등
-                    strategicDirections.add((destinationDirection - 90 + 360) % 360); // 왼쪽
-                    strategicDirections.add((destinationDirection + 90) % 360);       // 오른쪽
                 }
+            } else {
+                // 균형 경로: 좌우 균등하되 maxDeviation 이내
+                double[] offsets = {maxDeviation * 0.5, maxDeviation * 0.7};
+                for (double offset : offsets) {
+                    double leftDirection = (destinationDirection - 90 + 360) % 360;
+                    RoutePoint waypoint = createWaypointAtDirection(midLat, midLng, leftDirection, offset);
 
-                // 각 방향으로 경유지 생성
-                for (Double direction : strategicDirections) {
-                    RoutePoint waypoint = createWaypointAtDirection(midLat, midLng, direction, 50.0); // 50m
-                    if (waypoint != null) {
+                    if (waypoint != null && isWaypointValid(waypoint, startLat, startLng, endLat, endLng, maxDeviation)) {
                         waypoints.add(waypoint);
+                        break;
                     }
                 }
             }
-
-        } catch (Exception e) {
-            logger.error("전략적 경유지 생성 오류: " + e.getMessage(), e);
         }
 
         return waypoints;
     }
+
+    private boolean isWaypointValid(RoutePoint waypoint, double startLat, double startLng,
+                                    double endLat, double endLng, double maxDeviation) {
+        // 직선에서의 거리 확인
+        double perpDistance = calculatePointToLineDistance(waypoint,
+                new RoutePoint(startLat, startLng), new RoutePoint(endLat, endLng));
+
+        if (perpDistance > maxDeviation) {
+            return false;
+        }
+
+        // 진행률 확인 (너무 시작/끝 부분은 제외)
+        double progress = calculateProgressAlongRoute(
+                new RoutePoint(startLat, startLng), waypoint, new RoutePoint(endLat, endLng));
+
+        if (progress < 0.15 || progress > 0.85) {
+            return false;
+        }
+
+        // 우회율 확인
+        double directDistance = calculateDistance(startLat, startLng, endLat, endLng);
+        double viaDistance = calculateDistance(startLat, startLng, waypoint.getLat(), waypoint.getLng()) +
+                calculateDistance(waypoint.getLat(), waypoint.getLng(), endLat, endLng);
+        double detourRatio = viaDistance / directDistance;
+
+        // 거리별 다른 우회율 허용
+        double maxDetourRatio = directDistance < 500 ? 1.15 : 1.25;
+
+        return detourRatio <= maxDetourRatio;
+    }
+
+    /**
+     * 경로상 진행률 계산
+     */
+    private double calculateProgressAlongRoute(RoutePoint start, RoutePoint point, RoutePoint end) {
+        // 벡터 투영을 이용한 진행률 계산
+        double totalDistance = calculateDistance(start.getLat(), start.getLng(), end.getLat(), end.getLng());
+        if (totalDistance == 0) return 0;
+
+        // 시작점에서 현재점까지의 벡터
+        double dx = point.getLng() - start.getLng();
+        double dy = point.getLat() - start.getLat();
+
+        // 시작점에서 끝점까지의 단위 벡터
+        double dirX = (end.getLng() - start.getLng()) / totalDistance;
+        double dirY = (end.getLat() - start.getLat()) / totalDistance;
+
+        // 내적을 통한 투영 거리
+        double projectedDistance = dx * dirX + dy * dirY;
+
+        return projectedDistance / totalDistance;
+    }
+
 
     /**
      * 균등 분포 경유지 생성
@@ -590,27 +661,44 @@ public class RouteCandidateService {
                 return null;
             }
 
-            // 1차: 그림자 비율 순으로 정렬
-            List<Route> sortedByShadow = candidateRoutes.stream()
-                    .sorted((r1, r2) -> Integer.compare(r2.getShadowPercentage(), r1.getShadowPercentage()))
+            double baseDistance = candidateRoutes.get(0).getDistance();
+
+            // 유효한 경로만 필터링 (과도한 우회 제거)
+            List<Route> validRoutes = candidateRoutes.stream()
+                    .filter(route -> {
+                        double detourRatio = route.getDistance() / baseDistance;
+                        // 거리별 다른 기준 적용
+                        double maxRatio = baseDistance < 500 ? 1.2 : 1.4;
+                        return detourRatio <= maxRatio;
+                    })
                     .collect(Collectors.toList());
 
-            // 상위 3개 후보 로깅
-            logger.info("=== 그림자 경로 상위 후보들 ===");
-            for (int i = 0; i < Math.min(3, sortedByShadow.size()); i++) {
-                Route route = sortedByShadow.get(i);
-                logger.info("{}위: 그늘 {}%, 거리 {}m",
-                        i + 1, route.getShadowPercentage(), (int)route.getDistance());
+            if (validRoutes.isEmpty()) {
+                logger.info("유효한 그림자 경로가 없음");
+                return null;
             }
 
-            // 2차: 그림자 비율이 높으면서 우회가 적당한 경로 선택
-            Route bestRoute = sortedByShadow.stream()
-                    .filter(route -> route.getShadowPercentage() >= 20) // 최소 20% 그늘
+            // 그림자가 충분한 경로만 선택
+            Route bestRoute = validRoutes.stream()
+                    .filter(route -> route.getShadowPercentage() >= 25) // 최소 25% 그늘
+                    .sorted((r1, r2) -> {
+                        // 그림자 비율과 효율성을 모두 고려
+                        double score1 = calculateRouteScore(r1, baseDistance);
+                        double score2 = calculateRouteScore(r2, baseDistance);
+                        return Double.compare(score2, score1);
+                    })
                     .findFirst()
-                    .orElse(sortedByShadow.get(0)); // 없으면 그냥 가장 그늘 많은 것
+                    .orElse(null);
 
-            logger.info("선택된 그림자 경로: 그늘 {}%, 거리 {}m",
-                    bestRoute.getShadowPercentage(), (int)bestRoute.getDistance());
+            if (bestRoute == null) {
+                logger.info("그림자 효과가 충분한 경로가 없음");
+                return null;
+            }
+
+            logger.info("선택된 그림자 경로: 그늘 {}%, 거리 {}m, 우회율 {}%",
+                    bestRoute.getShadowPercentage(),
+                    (int)bestRoute.getDistance(),
+                    (int)((bestRoute.getDistance() / baseDistance - 1) * 100));
 
             return bestRoute;
 
@@ -618,6 +706,19 @@ public class RouteCandidateService {
             logger.error("최적 그림자 경로 선택 오류: " + e.getMessage(), e);
             return candidateRoutes.isEmpty() ? null : candidateRoutes.get(0);
         }
+    }
+
+    // 경로 점수 계산
+    private double calculateRouteScore(Route route, double baseDistance) {
+        // 그림자 비율 점수 (0~100)
+        double shadowScore = route.getShadowPercentage();
+
+        // 효율성 점수 (우회가 적을수록 높음)
+        double detourRatio = route.getDistance() / baseDistance;
+        double efficiencyScore = Math.max(0, 100 - (detourRatio - 1) * 200);
+
+        // 종합 점수 (그림자 70%, 효율성 30%)
+        return shadowScore * 0.7 + efficiencyScore * 0.3;
     }
 
     /**
@@ -778,14 +879,20 @@ public class RouteCandidateService {
     /**
      * 가장 가까운 그림자 영역 방향 찾기
      */
-    private RoutePoint findNearestShadowDirection(double lat, double lng, List<ShadowArea> shadowAreas) {
+    private RoutePoint findNearestShadowPoint(double lat, double lng, List<ShadowArea> shadowAreas) {
         try {
             if (shadowAreas.isEmpty()) return null;
 
             RoutePoint reference = new RoutePoint(lat, lng);
             List<RoutePoint> shadowCenters = calculateShadowCenters(shadowAreas);
 
-            return findClosestShadowCenter(reference, shadowCenters);
+            // 거리별로 정렬해서 가장 가까운 것 선택
+            return shadowCenters.stream()
+                    .min((p1, p2) -> Double.compare(
+                            calculateDistance(lat, lng, p1.getLat(), p1.getLng()),
+                            calculateDistance(lat, lng, p2.getLat(), p2.getLng())
+                    ))
+                    .orElse(null);
 
         } catch (Exception e) {
             logger.error("가장 가까운 그림자 방향 찾기 오류: " + e.getMessage(), e);
