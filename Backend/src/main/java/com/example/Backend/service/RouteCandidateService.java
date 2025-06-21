@@ -173,7 +173,7 @@ public class RouteCandidateService {
      */
     private Route generateOptimizedShadeRoute(double startLat, double startLng, double endLat, double endLng, LocalDateTime dateTime) {
         try {
-            logger.info("=== 다중 경유지 그림자 경로 생성 시작 ===");
+            logger.info("=== 그림자 경로 생성 시작 ===");
 
             // 태양 위치 및 그림자 영역 계산
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
@@ -181,42 +181,43 @@ public class RouteCandidateService {
                     startLat, startLng, endLat, endLng, sunPos);
 
             if (shadowAreas.isEmpty()) {
-                logger.debug("그림자 영역 없음 - 기본 경로 사용");
-                return generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
+                logger.debug("그림자 영역 없음");
+                return generateShortestRoute(startLat, startLng, endLat, endLng, dateTime);
             }
 
-            // 경유지 생성 (적응적 개수)
-            List<RoutePoint> waypointCandidates = generateSmartWaypoints(
+            // 기본 경로
+            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng, dateTime);
+            if (baseRoute == null) {
+                return null;
+            }
+
+            // 여러 경유지 후보 생성
+            List<RoutePoint> waypointCandidates = createMultipleWaypointCandidates(
                     startLat, startLng, endLat, endLng, shadowAreas, sunPos, "shade");
 
-            logger.info("그림자 경유지: {}개", waypointCandidates.size());
-
             if (waypointCandidates.isEmpty()) {
-                logger.warn("그림자 경유지 생성 실패 - 기본 경로 사용");
-                return generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
+                logger.warn("그림자 경유지 후보 생성 실패");
+                return baseRoute;
             }
 
-            // 배치 호출
-            List<Route> candidateRoutes = evaluateWaypointsBatch(
-                    waypointCandidates, startLat, startLng, endLat, endLng, shadowAreas, 5);
+            // 여러 후보 중 최적 경로 선택
+            Route bestRoute = evaluateAndSelectBestRoute(waypointCandidates,
+                    startLat, startLng, endLat, endLng, shadowAreas, baseRoute, "shade");
 
-            // 최적 그림자 경로 선택
-            Route bestRoute = selectBestShadeRouteAdvanced(candidateRoutes, shadowAreas);
-
-            if (bestRoute != null) {
+            if (bestRoute != null && isSignificantlyBetter(bestRoute, baseRoute, "shade")) {
                 bestRoute.setRouteType("shade");
                 bestRoute.setWaypointCount(1);
-                logger.info("최적 그림자 경로 선택: 그늘 {}%, 거리 {}m",
-                        bestRoute.getShadowPercentage(), (int)bestRoute.getDistance());
+                logger.info("최적 그림자 경로 선택: 그늘 {}%, 거리 {}m, 우회 {}%",
+                        bestRoute.getShadowPercentage(), (int)bestRoute.getDistance(),
+                        (int)((bestRoute.getDistance() / baseRoute.getDistance() - 1) * 100));
+                return bestRoute;
             } else {
-                logger.warn("적합한 그림자 경로 없음 - 기본 경로 사용");
-                bestRoute = generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
+                logger.info("적합한 그림자 경로 없음");
+                return baseRoute;
             }
 
-            return bestRoute;
-
         } catch (Exception e) {
-            logger.error("다중 경유지 그림자 경로 생성 실패: " + e.getMessage(), e);
+            logger.error("그림자 경로 생성 실패: " + e.getMessage(), e);
             return null;
         }
     }
@@ -226,115 +227,389 @@ public class RouteCandidateService {
      */
     private Route generateOptimizedBalancedRoute(double startLat, double startLng, double endLat, double endLng, LocalDateTime dateTime) {
         try {
-            logger.info("=== 다중 경유지 균형 경로 생성 시작 ===");
+            logger.info("=== 균형 경로 생성 시작 ===");
 
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
             List<ShadowArea> shadowAreas = shadowRouteService.calculateBuildingShadows(
                     startLat, startLng, endLat, endLng, sunPos);
 
-            // 균형을 위한 경유지 생성
-            List<RoutePoint> waypointCandidates = generateSmartWaypoints(
+            // 기본 경로 (비교 기준)
+            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng, dateTime);
+            if (baseRoute == null) {
+                return null;
+            }
+
+            // 여러 경유지 후보 생성
+            List<RoutePoint> waypointCandidates = createMultipleWaypointCandidates(
                     startLat, startLng, endLat, endLng, shadowAreas, sunPos, "balanced");
 
-            logger.info("균형 경유지: {}개", waypointCandidates.size());
-
             if (waypointCandidates.isEmpty()) {
-                logger.warn("균형 경유지 생성 실패 - 기본 경로 변형 사용");
-                Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
+                logger.warn("균형 경유지 후보 생성 실패 - 기본 경로 변형 사용");
                 return createSlightVariation(baseRoute, startLat, startLng, endLat, endLng);
             }
 
-            // 배치 처리
-            List<Route> candidateRoutes = evaluateWaypointsBatch(
-                    waypointCandidates, startLat, startLng, endLat, endLng, shadowAreas, 5);
+            // 여러 후보 중 최적 경로 선택
+            Route bestRoute = evaluateAndSelectBestRoute(waypointCandidates,
+                    startLat, startLng, endLat, endLng, shadowAreas, baseRoute, "balanced");
 
-            // 기준 경로
-            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
-
-            Route bestRoute = selectBestBalancedRouteAdvanced(candidateRoutes, baseRoute);
-
-            if (bestRoute != null) {
+            if (bestRoute != null && isSignificantlyBetter(bestRoute, baseRoute, "balanced")) {
                 bestRoute.setRouteType("balanced");
                 bestRoute.setWaypointCount(1);
-                logger.info("최적 균형 경로 선택: 그늘 {}%, 거리 {}m",
-                        bestRoute.getShadowPercentage(), (int)bestRoute.getDistance());
+                logger.info("최적 균형 경로 선택: 그늘 {}%, 거리 {}m, 우회 {}%",
+                        bestRoute.getShadowPercentage(), (int)bestRoute.getDistance(),
+                        (int)((bestRoute.getDistance() / baseRoute.getDistance() - 1) * 100));
+                return bestRoute;
             } else {
-                logger.warn("적합한 균형 경로 없음 - 기본 경로 변형 사용");
-                bestRoute = createSlightVariation(baseRoute, startLat, startLng, endLat, endLng);
+                logger.info("적합한 균형 경로 없음");
+                return createSlightVariation(baseRoute, startLat, startLng, endLat, endLng);
             }
 
-            return bestRoute;
-
         } catch (Exception e) {
-            logger.error("다중 경유지 균형 경로 생성 실패: " + e.getMessage(), e);
-            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng,dateTime);
+            logger.error("균형 경로 생성 실패: " + e.getMessage(), e);
+            Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng, dateTime);
             return createSlightVariation(baseRoute, startLat, startLng, endLat, endLng);
         }
     }
 
     /**
-     *  경유지 생성 (적응적)
+     * 여러 경유지 후보 생성
      */
-    private List<RoutePoint> generateSmartWaypoints(double startLat, double startLng, double endLat, double endLng,
-                                                    List<ShadowArea> shadowAreas, SunPosition sunPos, String routeType) {
+    private List<RoutePoint> createMultipleWaypointCandidates(double startLat, double startLng,
+                                                              double endLat, double endLng,
+                                                              List<ShadowArea> shadowAreas,
+                                                              SunPosition sunPos, String routeType) {
         List<RoutePoint> candidates = new ArrayList<>();
 
         try {
-            double routeDistance = calculateDistance(startLat, startLng, endLat, endLng);
-            RoutePoint startPoint = new RoutePoint(startLat, startLng);
-            RoutePoint endPoint = new RoutePoint(endLat, endLng);
-            double destinationDirection = calculateBearing(startPoint, endPoint);
+            List<RoutePoint> basePoints = Arrays.asList(
+                    new RoutePoint(startLat, startLng),
+                    new RoutePoint(endLat, endLng)
+            );
 
-            // 적응적 후보 개수 (거리에 따라)
-            int targetCandidates;
-            if (routeDistance < 500) {
-                targetCandidates = 8;   // 단거리: 8개
-            } else if (routeDistance < 1000) {
-                targetCandidates = 12;  // 중거리: 12개
-            } else if (routeDistance < 2000) {
-                targetCandidates = 15;  // 장거리: 15개
-            } else {
-                targetCandidates = 18;  // 초장거리: 18개
-            }
+            // 여러 거리와 방향으로 경유지 후보 생성
+            double[] distances = {35.0, 50.0, 65.0};  // 3가지 거리
+            double[] angleOffsets = {-30.0, 0.0, 30.0}; // 3가지 방향 (기본 방향 ± 30도)
 
-            logger.debug("경로 거리 {}m → 목표 경유지 {}개", (int)routeDistance, targetCandidates);
+            for (double distance : distances) {
+                for (double angleOffset : angleOffsets) {
+                    try {
+                        RoutePoint waypoint = createStrategicWaypointWithParams(
+                                basePoints, sunPos, "shade".equals(routeType),
+                                shadowAreas, distance, angleOffset);
 
-            // 전략적 지점 (우선순위 높음)
-            candidates.addAll(generateStrategicWaypoints(startLat, startLng, endLat, endLng,
-                    destinationDirection, routeType, sunPos, shadowAreas));
-
-            // 균등 분포 경유지
-            if (candidates.size() < targetCandidates) {
-                candidates.addAll(generateDistributedWaypoints(startLat, startLng, endLat, endLng,
-                        destinationDirection, targetCandidates - candidates.size()));
-            }
-
-            // 그림자 밀도 기반 (그림자 경로의 경우)
-            if ("shade".equals(routeType) && !shadowAreas.isEmpty() && candidates.size() < targetCandidates) {
-                candidates.addAll(generateShadowDensityWaypoints(startLat, startLng, endLat, endLng,
-                        shadowAreas, destinationDirection,
-                        targetCandidates - candidates.size()));
+                        if (waypoint != null) {
+                            candidates.add(waypoint);
+                        }
+                    } catch (Exception e) {
+                        logger.debug("경유지 후보 생성 실패 (거리: {}m, 각도: {}도): {}",
+                                distance, angleOffset, e.getMessage());
+                    }
+                }
             }
 
             // 중복 제거 및 유효성 검사
+            RoutePoint startPoint = new RoutePoint(startLat, startLng);
+            RoutePoint endPoint = new RoutePoint(endLat, endLng);
+
             List<RoutePoint> validCandidates = candidates.stream()
                     .filter(wp -> isWaypointProgressive(startPoint, wp, endPoint))
-                    .filter(wp -> isWaypointReasonable(wp, startPoint, endPoint))
                     .distinct()
-                    .limit(targetCandidates)
+                    .limit(15) // 최대 15개 후보
                     .collect(Collectors.toList());
 
-            logger.info("스마트 경유지 최종: {}개 (목표: {}개)", validCandidates.size(), targetCandidates);
+            logger.info("경유지 후보 생성 완료: {}개 → {}개 유효", candidates.size(), validCandidates.size());
             return validCandidates;
 
         } catch (Exception e) {
-            logger.error("스마트 경유지 생성 오류: " + e.getMessage(), e);
+            logger.error("경유지 후보 생성 오류: " + e.getMessage(), e);
             return new ArrayList<>();
         }
     }
 
     /**
-     *  배치 처리로 경유지 평가 (성능 최적화)
+     * 파라미터가 있는 전략적 경유지 생성
+     */
+    private RoutePoint createStrategicWaypointWithParams(List<RoutePoint> basePoints,
+                                                         SunPosition sunPos, boolean avoidShadow,
+                                                         List<ShadowArea> shadowAreas,
+                                                         double distance, double angleOffset) {
+        if (basePoints.size() < 2) return null;
+
+        try {
+            RoutePoint startPoint = basePoints.get(0);
+            RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
+            RoutePoint middlePoint = new RoutePoint(
+                    (startPoint.getLat() + endPoint.getLat()) / 2,
+                    (startPoint.getLng() + endPoint.getLng()) / 2
+            );
+
+            // 목적지 방향 계산
+            double destinationDirection = calculateBearing(startPoint, endPoint);
+
+            // 원하는 경유지 방향 계산
+            double preferredDirection;
+            if (avoidShadow) {
+                preferredDirection = sunPos.getAzimuth(); // 태양 방향
+            } else {
+                preferredDirection = (sunPos.getAzimuth() + 180) % 360; // 그림자 방향
+            }
+
+            // 각도 오프셋 적용
+            preferredDirection = (preferredDirection + angleOffset + 360) % 360;
+
+            // 목적지 방향 제약
+            double constrainedDirection = constrainDirectionToDestination(
+                    preferredDirection, destinationDirection);
+
+            // 경유지 생성
+            RoutePoint waypoint = createWaypointAtDirection(
+                    middlePoint.getLat(), middlePoint.getLng(), constrainedDirection, distance);
+
+            return waypoint;
+
+        } catch (Exception e) {
+            logger.error("파라미터 경유지 생성 오류: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * 여러 후보 중 최적 경로 선택
+     */
+    private Route evaluateAndSelectBestRoute(List<RoutePoint> waypointCandidates,
+                                             double startLat, double startLng, double endLat, double endLng,
+                                             List<ShadowArea> shadowAreas, Route baseRoute, String routeType) {
+        try {
+            logger.info("=== 경로 후보 평가 시작: {}개 경유지 ===", waypointCandidates.size());
+
+            List<Route> candidateRoutes = evaluateWaypointsBatch(
+                    waypointCandidates, startLat, startLng, endLat, endLng, shadowAreas, 8);
+
+            if (candidateRoutes.isEmpty()) {
+                logger.info("생성된 후보 경로 없음");
+                return null;
+            }
+
+            // 품질 필터링 - 극단적 우회 제거
+            List<Route> qualityRoutes = candidateRoutes.stream()
+                    .filter(route -> isRouteQualityGood(route, baseRoute))
+                    .collect(Collectors.toList());
+
+            logger.info("품질 필터링: {}개 → {}개", candidateRoutes.size(), qualityRoutes.size());
+
+            if (qualityRoutes.isEmpty()) {
+                logger.info("품질 기준을 통과한 경로 없음");
+                return null;
+            }
+
+            // 타입별 최적 경로 선택
+            Route bestRoute;
+            if ("shade".equals(routeType)) {
+                bestRoute = selectBestShadeRouteAdvanced(qualityRoutes, shadowAreas);
+            } else {
+                bestRoute = selectBestBalancedRouteAdvanced(qualityRoutes, baseRoute);
+            }
+
+            if (bestRoute != null) {
+                logger.info("최적 경로 선택 완료: 타입={}, 그늘={}%, 우회={}%",
+                        routeType, bestRoute.getShadowPercentage(),
+                        (int)((bestRoute.getDistance() / baseRoute.getDistance() - 1) * 100));
+            }
+
+            return bestRoute;
+
+        } catch (Exception e) {
+            logger.error("경로 후보 평가 오류: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * 경로 품질 검사 (극단적 우회 방지)
+     */
+    private boolean isRouteQualityGood(Route route, Route baseRoute) {
+        try {
+            if (route == null || route.getPoints().isEmpty() || baseRoute == null) {
+                return false;
+            }
+
+            // 우회 비율 제한
+            double detourRatio = route.getDistance() / baseRoute.getDistance();
+            if (detourRatio > 1.3) { // 130% 이하만 허용
+                logger.debug("우회 비율 초과: {}% > 130%", (int)(detourRatio * 100));
+                return false;
+            }
+
+            // 최소 포인트 수
+            if (route.getPoints().size() < 3) {
+                logger.debug("포인트 수 부족: {}개", route.getPoints().size());
+                return false;
+            }
+
+            // 연속성 검사 (기존 메서드 재활용)
+            if (!isRouteContinuous(route)) {
+                logger.debug("경로 연속성 실패");
+                return false;
+            }
+
+            // 진행성 검사 (기존 메서드 재활용)
+            if (!isProgressiveRoute(route)) {
+                logger.debug("경로 진행성 실패");
+                return false;
+            }
+
+            logger.debug("경로 품질 검증 통과: 우회={}%", (int)((detourRatio - 1) * 100));
+            return true;
+
+        } catch (Exception e) {
+            logger.error("경로 품질 검사 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 경로 연속성 검증 (포인트 간 거리가 비정상적으로 크지 않은지 확인)
+     */
+    private boolean isRouteContinuous(Route route) {
+        try {
+            List<RoutePoint> points = route.getPoints();
+            if (points.size() < 2) return true;
+
+            int discontinuousCount = 0;
+            final double MAX_SEGMENT_DISTANCE = 500.0; // 500m 이상 점프는 비정상
+
+            for (int i = 0; i < points.size() - 1; i++) {
+                RoutePoint current = points.get(i);
+                RoutePoint next = points.get(i + 1);
+
+                double segmentDistance = calculateDistance(
+                        current.getLat(), current.getLng(),
+                        next.getLat(), next.getLng()
+                );
+
+                if (segmentDistance > MAX_SEGMENT_DISTANCE) {
+                    discontinuousCount++;
+                    logger.debug("긴 구간 발견: {}m (포인트 {} → {})",
+                            (int)segmentDistance, i, i + 1);
+                }
+            }
+
+            // 전체 구간의 5% 이상이 비정상적으로 길면 실패
+            double discontinuousRatio = (double) discontinuousCount / (points.size() - 1);
+            boolean isContinuous = discontinuousRatio <= 0.05;
+
+            logger.debug("경로 연속성: {}% 비정상 구간 (허용: 5%)", (int)(discontinuousRatio * 100));
+            return isContinuous;
+
+        } catch (Exception e) {
+            logger.error("경로 연속성 검증 오류: " + e.getMessage(), e);
+            return true; // 오류 시 허용
+        }
+    }
+
+    /**
+     * 전진성 검증 강화 (역방향 이동이나 과도한 우회 방지)
+     */
+    private boolean isProgressiveRoute(Route route) {
+        try {
+            List<RoutePoint> points = route.getPoints();
+            if (points.size() < 5) return true;
+
+            RoutePoint start = points.get(0);
+            RoutePoint end = points.get(points.size() - 1);
+
+            // 전체적인 목적지 방향 계산
+            double overallDirection = Math.atan2(
+                    end.getLng() - start.getLng(),
+                    end.getLat() - start.getLat()
+            );
+
+            // 경로 구간들의 방향성 분석
+            int forwardSegments = 0;
+            int backwardSegments = 0;
+            int totalSegments = 0;
+
+            // 10개 포인트마다 샘플링하여 분석
+            int stepSize = Math.max(1, points.size() / 20); // 최대 20개 샘플
+            for (int i = 0; i < points.size() - stepSize; i += stepSize) {
+                RoutePoint current = points.get(i);
+                RoutePoint next = points.get(Math.min(i + stepSize, points.size() - 1));
+
+                double segmentDirection = Math.atan2(
+                        next.getLng() - current.getLng(),
+                        next.getLat() - current.getLat()
+                );
+
+                // 전체 방향과의 각도 차이 계산
+                double angleDiff = Math.abs(segmentDirection - overallDirection);
+                if (angleDiff > Math.PI) {
+                    angleDiff = 2 * Math.PI - angleDiff;
+                }
+
+                if (angleDiff <= Math.PI / 2) { // 90도 이내
+                    forwardSegments++;
+                } else {
+                    backwardSegments++;
+                    logger.debug("--- 역방향 구간 감지: 포인트 {} → {}, 각도차이: {}도",
+                            i, i + stepSize, Math.toDegrees(angleDiff));
+                }
+                totalSegments++;
+            }
+
+            // 75% 이상이 전진 방향이어야 함
+            double forwardRatio = totalSegments > 0 ? (double) forwardSegments / totalSegments : 1.0;
+            boolean isProgressive = forwardRatio >= 0.75;
+
+            logger.debug("경로 전진성: {}% 전진 구간 (기준: 75%)", (int)(forwardRatio * 100));
+
+            return isProgressive;
+
+        } catch (Exception e) {
+            logger.error("전진성 검증 오류: " + e.getMessage(), e);
+            return true;
+        }
+    }
+
+    /**
+     * 기본 경로 대비 의미있는 개선인지 확인
+     */
+    private boolean isSignificantlyBetter(Route candidate, Route baseRoute, String routeType) {
+        try {
+            if (candidate == null || baseRoute == null) {
+                return false;
+            }
+
+            double detourRatio = candidate.getDistance() / baseRoute.getDistance();
+
+            if ("shade".equals(routeType)) {
+                // 그림자 경로: 그늘이 최소 10% 이상 증가해야 함
+                int shadowDiff = candidate.getShadowPercentage() - baseRoute.getShadowPercentage();
+                boolean hasSignificantShadow = shadowDiff >= 10;
+
+                logger.debug("그림자 경로 평가: 그늘 차이={}%, 우회={}%, 의미있음={}",
+                        shadowDiff, (int)((detourRatio - 1) * 100), hasSignificantShadow);
+
+                return hasSignificantShadow;
+
+            } else { // balanced
+                // 균형 경로: 적당한 그늘 증가 + 합리적 우회
+                int shadowDiff = candidate.getShadowPercentage() - baseRoute.getShadowPercentage();
+                boolean hasModerateImprovement = shadowDiff >= 5 && detourRatio <= 1.2;
+
+                logger.debug("균형 경로 평가: 그늘 차이={}%, 우회={}%, 균형적={}",
+                        shadowDiff, (int)((detourRatio - 1) * 100), hasModerateImprovement);
+
+                return hasModerateImprovement;
+            }
+
+        } catch (Exception e) {
+            logger.error("의미있는 개선 검사 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     *  배치 처리로 경유지 평가
      */
     private List<Route> evaluateWaypointsBatch(List<RoutePoint> waypoints, double startLat, double startLng,
                                                double endLat, double endLng, List<ShadowArea> shadowAreas, int batchSize) {
@@ -444,141 +719,6 @@ public class RouteCandidateService {
         }
     }
 
-    /**
-     * 전략적 경유지 생성 (우선순위 높음)
-     */
-    private List<RoutePoint> generateStrategicWaypoints(double startLat, double startLng, double endLat, double endLng,
-                                                        double destinationDirection, String routeType,
-                                                        SunPosition sunPos, List<ShadowArea> shadowAreas) {
-        List<RoutePoint> waypoints = new ArrayList<>();
-
-        try {
-            // 경로의 핵심 지점들 (1/4, 1/2, 3/4)
-            double[] ratios = {0.25, 0.5, 0.75};
-
-            for (double ratio : ratios) {
-                double midLat = startLat + (endLat - startLat) * ratio;
-                double midLng = startLng + (endLng - startLng) * ratio;
-
-                // 방향들
-                List<Double> strategicDirections = new ArrayList<>();
-
-                if ("shade".equals(routeType)) {
-                    // 그림자 방향 (태양 반대)
-                    double shadowDirection = (sunPos.getAzimuth() + 180) % 360;
-                    strategicDirections.add(constrainDirectionToDestination(shadowDirection, destinationDirection));
-
-                    // 가장 가까운 그림자 영역 방향
-                    RoutePoint nearestShadowDirection = findNearestShadowDirection(midLat, midLng, shadowAreas);
-                    if (nearestShadowDirection != null) {
-                        double shadowAreaDirection = calculateBearing(new RoutePoint(midLat, midLng), nearestShadowDirection);
-                        strategicDirections.add(constrainDirectionToDestination(shadowAreaDirection, destinationDirection));
-                    }
-                } else {
-                    // 균형: 좌우 균등
-                    strategicDirections.add((destinationDirection - 90 + 360) % 360); // 왼쪽
-                    strategicDirections.add((destinationDirection + 90) % 360);       // 오른쪽
-                }
-
-                // 각 방향으로 경유지 생성
-                for (Double direction : strategicDirections) {
-                    RoutePoint waypoint = createWaypointAtDirection(midLat, midLng, direction, 50.0); // 50m
-                    if (waypoint != null) {
-                        waypoints.add(waypoint);
-                    }
-                }
-            }
-
-        } catch (Exception e) {
-            logger.error("전략적 경유지 생성 오류: " + e.getMessage(), e);
-        }
-
-        return waypoints;
-    }
-
-    /**
-     * 균등 분포 경유지 생성
-     */
-    private List<RoutePoint> generateDistributedWaypoints(double startLat, double startLng, double endLat, double endLng,
-                                                          double destinationDirection, int needed) {
-        List<RoutePoint> waypoints = new ArrayList<>();
-
-        try {
-            // 좌우로 균등하게 분포
-            double[] distances = {30.0, 60.0, 90.0};
-            double[] ratios = {0.3, 0.5, 0.7};
-
-            for (double ratio : ratios) {
-                if (waypoints.size() >= needed) break;
-
-                double midLat = startLat + (endLat - startLat) * ratio;
-                double midLng = startLng + (endLng - startLng) * ratio;
-
-                for (double distance : distances) {
-                    if (waypoints.size() >= needed) break;
-
-                    // 좌우 방향
-                    double leftDirection = (destinationDirection - 90 + 360) % 360;
-                    double rightDirection = (destinationDirection + 90) % 360;
-
-                    RoutePoint leftWaypoint = createWaypointAtDirection(midLat, midLng, leftDirection, distance);
-                    if (leftWaypoint != null && waypoints.size() < needed) {
-                        waypoints.add(leftWaypoint);
-                    }
-
-                    RoutePoint rightWaypoint = createWaypointAtDirection(midLat, midLng, rightDirection, distance);
-                    if (rightWaypoint != null && waypoints.size() < needed) {
-                        waypoints.add(rightWaypoint);
-                    }
-                }
-            }
-
-        } catch (Exception e) {
-            logger.error("균등 분포 경유지 생성 오류: " + e.getMessage(), e);
-        }
-
-        return waypoints;
-    }
-
-    /**
-     * 그림자 밀도 기반 경유지 생성
-     */
-    private List<RoutePoint> generateShadowDensityWaypoints(double startLat, double startLng, double endLat, double endLng,
-                                                            List<ShadowArea> shadowAreas, double destinationDirection, int needed) {
-        List<RoutePoint> waypoints = new ArrayList<>();
-
-        try {
-            // 그림자 영역의 중심점들 계산
-            List<RoutePoint> shadowCenters = calculateShadowCenters(shadowAreas);
-
-            for (RoutePoint shadowCenter : shadowCenters) {
-                if (waypoints.size() >= needed) break;
-
-                // 경로 상 중간지점에서 그림자 중심으로 향하는 방향
-                RoutePoint midPoint = new RoutePoint((startLat + endLat) / 2, (startLng + endLng) / 2);
-                double shadowDirection = calculateBearing(midPoint, shadowCenter);
-
-                // 방향 제약 적용
-                double constrainedDirection = constrainDirectionToDestination(shadowDirection, destinationDirection);
-
-                // 다양한 거리로 경유지 생성
-                for (double distance : Arrays.asList(40.0, 60.0, 90.0)) {
-                    if (waypoints.size() >= needed) break;
-
-                    RoutePoint waypoint = createWaypointAtDirection(
-                            midPoint.getLat(), midPoint.getLng(), constrainedDirection, distance);
-                    if (waypoint != null) {
-                        waypoints.add(waypoint);
-                    }
-                }
-            }
-
-        } catch (Exception e) {
-            logger.error("그림자 밀도 기반 경유지 생성 오류: " + e.getMessage(), e);
-        }
-
-        return waypoints;
-    }
 
     /**
      *  그림자가 가장 많은 경로 선택
@@ -693,24 +833,6 @@ public class RouteCandidateService {
     }
 
     /**
-     * 경유지 합리성 검사
-     */
-    private boolean isWaypointReasonable(RoutePoint waypoint, RoutePoint start, RoutePoint end) {
-        try {
-            // 경유지가 출발지-목적지 직선에서 너무 멀리 떨어지지 않았는지 확인
-            double directDistance = calculateDistance(start.getLat(), start.getLng(), end.getLat(), end.getLng());
-            double waypointToLineDistance = calculatePointToLineDistance(waypoint, start, end);
-
-            // 직선거리의 15% 이내에 있어야 함
-            return waypointToLineDistance <= directDistance * 0.15;
-
-        } catch (Exception e) {
-            logger.error("경유지 합리성 검사 오류: " + e.getMessage(), e);
-            return true; // 오류 시 허용
-        }
-    }
-
-    /**
      * 점과 직선 사이의 거리 계산
      */
     private double calculatePointToLineDistance(RoutePoint point, RoutePoint lineStart, RoutePoint lineEnd) {
@@ -771,24 +893,6 @@ public class RouteCandidateService {
 
         } catch (Exception e) {
             logger.error("방향 기반 경유지 생성 오류: " + e.getMessage(), e);
-            return null;
-        }
-    }
-
-    /**
-     * 가장 가까운 그림자 영역 방향 찾기
-     */
-    private RoutePoint findNearestShadowDirection(double lat, double lng, List<ShadowArea> shadowAreas) {
-        try {
-            if (shadowAreas.isEmpty()) return null;
-
-            RoutePoint reference = new RoutePoint(lat, lng);
-            List<RoutePoint> shadowCenters = calculateShadowCenters(shadowAreas);
-
-            return findClosestShadowCenter(reference, shadowCenters);
-
-        } catch (Exception e) {
-            logger.error("가장 가까운 그림자 방향 찾기 오류: " + e.getMessage(), e);
             return null;
         }
     }
@@ -1021,242 +1125,6 @@ public class RouteCandidateService {
             logger.error("벡터 전진 검증 오류: " + e.getMessage(), e);
             return true; // 오류 시 허용
         }
-    }
-
-
-    /**
-     * 그림자 영역들의 중심점 계산
-     */
-    private List<RoutePoint> calculateShadowCenters(List<ShadowArea> shadowAreas) {
-        List<RoutePoint> centers = new ArrayList<>();
-
-        for (ShadowArea area : shadowAreas) {
-            try {
-                String shadowGeometry = area.getShadowGeometry();
-                if (shadowGeometry == null || shadowGeometry.trim().isEmpty()) {
-                    logger.debug("그림자 영역 geometry 데이터 없음");
-                    continue;
-                }
-
-                // GeoJSON 파싱하여 실제 중심점 계산
-                RoutePoint center = parseGeoJsonCenter(shadowGeometry);
-                if (center != null) {
-                    centers.add(center);
-                    logger.debug("그림자 중심점 계산: lat={}, lng={}", center.getLat(), center.getLng());
-                }
-
-            } catch (Exception e) {
-                logger.warn("그림자 중심점 계산 실패: " + e.getMessage());
-            }
-        }
-
-        logger.info("그림자 영역 {}개 → 유효 중심점 {}개", shadowAreas.size(), centers.size());
-        return centers;
-    }
-
-    /**
-     * GeoJSON에서 중심점 추출
-     */
-    private RoutePoint parseGeoJsonCenter(String geoJsonString) {
-        try {
-            // JSON 파싱
-            ObjectMapper mapper = new ObjectMapper();
-            JsonNode geoJson = mapper.readTree(geoJsonString);
-
-            // geometry 타입 확인
-            JsonNode geometryNode = geoJson.has("geometry") ? geoJson.get("geometry") : geoJson;
-            String geometryType = geometryNode.get("type").asText();
-            JsonNode coordinatesNode = geometryNode.get("coordinates");
-
-            if (coordinatesNode == null) {
-                logger.debug("coordinates 노드가 없음");
-                return null;
-            }
-
-            switch (geometryType) {
-                case "Polygon":
-                    return calculatePolygonCenter(coordinatesNode);
-
-                case "MultiPolygon":
-                    return calculateMultiPolygonCenter(coordinatesNode);
-
-                case "Point":
-                    return parsePointCoordinates(coordinatesNode);
-
-                case "LineString":
-                    return calculateLineStringCenter(coordinatesNode);
-
-                default:
-                    logger.debug("지원하지 않는 geometry 타입: {}", geometryType);
-                    return null;
-            }
-
-        } catch (Exception e) {
-            logger.error("GeoJSON 중심점 파싱 오류: " + e.getMessage());
-            return null;
-        }
-    }
-
-
-    /**
-     * Polygon의 중심점 계산 (Centroid)
-     */
-    private RoutePoint calculatePolygonCenter(JsonNode coordinatesNode) {
-        try {
-            // Polygon의 첫 번째 링(외곽선) 사용
-            JsonNode outerRing = coordinatesNode.get(0);
-            if (outerRing == null || !outerRing.isArray()) {
-                return null;
-            }
-
-            double sumLat = 0.0;
-            double sumLng = 0.0;
-            int pointCount = 0;
-
-            // 모든 좌표의 평균 계산 (간단한 centroid)
-            for (JsonNode point : outerRing) {
-                if (point.isArray() && point.size() >= 2) {
-                    double lng = point.get(0).asDouble();
-                    double lat = point.get(1).asDouble();
-
-                    // 유효한 좌표인지 확인
-                    if (isValidCoordinate(lat, lng)) {
-                        sumLat += lat;
-                        sumLng += lng;
-                        pointCount++;
-                    }
-                }
-            }
-
-            if (pointCount > 0) {
-                double centerLat = sumLat / pointCount;
-                double centerLng = sumLng / pointCount;
-                return new RoutePoint(centerLat, centerLng);
-            }
-
-        } catch (Exception e) {
-            logger.error("Polygon 중심점 계산 오류: " + e.getMessage());
-        }
-
-        return null;
-    }
-
-    /**
-     * MultiPolygon의 중심점 계산
-     */
-    private RoutePoint calculateMultiPolygonCenter(JsonNode coordinatesNode) {
-        try {
-            List<RoutePoint> polygonCenters = new ArrayList<>();
-
-            // 각 Polygon의 중심점 계산
-            for (JsonNode polygon : coordinatesNode) {
-                RoutePoint center = calculatePolygonCenter(polygon);
-                if (center != null) {
-                    polygonCenters.add(center);
-                }
-            }
-
-            // 모든 Polygon 중심점들의 평균 계산
-            if (!polygonCenters.isEmpty()) {
-                double sumLat = polygonCenters.stream().mapToDouble(RoutePoint::getLat).sum();
-                double sumLng = polygonCenters.stream().mapToDouble(RoutePoint::getLng).sum();
-
-                double centerLat = sumLat / polygonCenters.size();
-                double centerLng = sumLng / polygonCenters.size();
-
-                return new RoutePoint(centerLat, centerLng);
-            }
-
-        } catch (Exception e) {
-            logger.error("MultiPolygon 중심점 계산 오류: " + e.getMessage());
-        }
-
-        return null;
-    }
-
-    /**
-     * Point 좌표 파싱
-     */
-    private RoutePoint parsePointCoordinates(JsonNode coordinatesNode) {
-        try {
-            if (coordinatesNode.isArray() && coordinatesNode.size() >= 2) {
-                double lng = coordinatesNode.get(0).asDouble();
-                double lat = coordinatesNode.get(1).asDouble();
-
-                if (isValidCoordinate(lat, lng)) {
-                    return new RoutePoint(lat, lng);
-                }
-            }
-        } catch (Exception e) {
-            logger.error("Point 좌표 파싱 오류: " + e.getMessage());
-        }
-
-        return null;
-    }
-
-    /**
-     * LineString의 중심점 계산
-     */
-    private RoutePoint calculateLineStringCenter(JsonNode coordinatesNode) {
-        try {
-            double sumLat = 0.0;
-            double sumLng = 0.0;
-            int pointCount = 0;
-
-            for (JsonNode point : coordinatesNode) {
-                if (point.isArray() && point.size() >= 2) {
-                    double lng = point.get(0).asDouble();
-                    double lat = point.get(1).asDouble();
-
-                    if (isValidCoordinate(lat, lng)) {
-                        sumLat += lat;
-                        sumLng += lng;
-                        pointCount++;
-                    }
-                }
-            }
-
-            if (pointCount > 0) {
-                double centerLat = sumLat / pointCount;
-                double centerLng = sumLng / pointCount;
-                return new RoutePoint(centerLat, centerLng);
-            }
-
-        } catch (Exception e) {
-            logger.error("LineString 중심점 계산 오류: " + e.getMessage());
-        }
-
-        return null;
-    }
-
-    /**
-     * 좌표 유효성 검사 (한국 범위)
-     */
-    private boolean isValidCoordinate(double lat, double lng) {
-        // 한국 좌표 범위: 위도 33-39, 경도 124-132
-        return lat >= 33.0 && lat <= 39.0 && lng >= 124.0 && lng <= 132.0;
-    }
-
-    /**
-     * 가장 가까운 그림자 중심점 찾기
-     */
-    private RoutePoint findClosestShadowCenter(RoutePoint reference, List<RoutePoint> shadowCenters) {
-        RoutePoint closest = null;
-        double minDistance = Double.MAX_VALUE;
-
-        for (RoutePoint center : shadowCenters) {
-            double distance = calculateDistance(
-                    reference.getLat(), reference.getLng(),
-                    center.getLat(), center.getLng()
-            );
-
-            if (distance < minDistance) {
-                minDistance = distance;
-                closest = center;
-            }
-        }
-
-        return closest;
     }
 
     /**
