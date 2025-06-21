@@ -177,11 +177,14 @@ public class RouteCandidateService {
 
             // 태양 위치 및 그림자 영역 계산
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
+            logger.info("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
+
             List<ShadowArea> shadowAreas = shadowRouteService.calculateBuildingShadows(
                     startLat, startLng, endLat, endLng, sunPos);
+            logger.info("그림자 영역: {}개 발견", shadowAreas.size());
 
             if (shadowAreas.isEmpty()) {
-                logger.debug("그림자 영역 없음");
+                logger.warn("그림자 영역이 없음 - 시간: {}, 태양고도: {}도", dateTime, sunPos.getAltitude());
                 return generateShortestRoute(startLat, startLng, endLat, endLng, dateTime);
             }
 
@@ -190,6 +193,9 @@ public class RouteCandidateService {
             if (baseRoute == null) {
                 return null;
             }
+
+            shadowRouteService.applyShadowInfoFromDB(baseRoute, shadowAreas);
+            logger.info("기본 경로 그림자: {}%", baseRoute.getShadowPercentage());
 
             // 간단한 경유지 변형들 생성
             List<RoutePoint> waypointVariants = createSimpleWaypointVariants(
@@ -230,14 +236,23 @@ public class RouteCandidateService {
             logger.info("=== 균형 경로 생성 ===");
 
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
+            logger.info("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
+
             List<ShadowArea> shadowAreas = shadowRouteService.calculateBuildingShadows(
                     startLat, startLng, endLat, endLng, sunPos);
+            logger.info("그림자 영역: {}개 발견", shadowAreas.size());
 
             // 기본 경로 (비교 기준)
             Route baseRoute = generateShortestRoute(startLat, startLng, endLat, endLng, dateTime);
             if (baseRoute == null) {
                 return null;
             }
+
+            if (!shadowAreas.isEmpty()) {
+                shadowRouteService.applyShadowInfoFromDB(baseRoute, shadowAreas);
+                logger.info("기본 경로 그림자: {}%", baseRoute.getShadowPercentage());
+            }
+
 
             // 간단한 경유지 변형들 생성
             List<RoutePoint> waypointVariants = createSimpleWaypointVariants(
@@ -260,8 +275,16 @@ public class RouteCandidateService {
                         (int)((bestRoute.getDistance() / baseRoute.getDistance() - 1) * 100));
                 return bestRoute;
             } else {
-                logger.info("적합한 균형 경로 없음 - 기본 경로 변형 사용");
-                return createSlightVariation(baseRoute, startLat, startLng, endLat, endLng);
+                logger.info("적합한 균형 경로 없음 (기본 그늘: {}%)",
+                        baseRoute.getShadowPercentage());
+                Route variation = createSlightVariation(baseRoute, startLat, startLng, endLat, endLng);
+
+                if (variation != null && !shadowAreas.isEmpty()) {
+                    shadowRouteService.applyShadowInfoFromDB(variation, shadowAreas);
+                    logger.info("변형 경로 그림자: {}%", variation.getShadowPercentage());
+                }
+
+                return variation;
             }
 
         } catch (Exception e) {
@@ -378,6 +401,17 @@ public class RouteCandidateService {
 
                     if (route != null && !route.getPoints().isEmpty()) {
                         shadowRouteService.applyShadowInfoFromDB(route, shadowAreas);
+
+                        // 🔍 디버깅: 그림자 정보 확인
+                        logger.info("경유지 경로 생성: 포인트={}개, 그림자={}%",
+                                route.getPoints().size(), route.getShadowPercentage());
+
+                        // 그림자가 있는 포인트 개수 확인
+                        long shadowPointCount = route.getPoints().stream()
+                                .mapToLong(p -> p.isInShadow() ? 1 : 0)
+                                .sum();
+                        logger.info("실제 그림자 포인트: {}개/{}", shadowPointCount, route.getPoints().size());
+
                         candidateRoutes.add(route);
                     }
                 } catch (Exception e) {
@@ -386,6 +420,7 @@ public class RouteCandidateService {
             }
 
             if (candidateRoutes.isEmpty()) {
+                logger.warn("생성된 후보 경로 없음");
                 return null;
             }
 
@@ -401,10 +436,34 @@ public class RouteCandidateService {
                 return null;
             }
 
+            logger.info("=== 최종 후보 경로들의 그림자 정보 ===");
+            for (int i = 0; i < reasonableRoutes.size(); i++) {
+                Route route = reasonableRoutes.get(i);
+                long shadowPoints = route.getPoints().stream()
+                        .mapToLong(p -> p.isInShadow() ? 1 : 0)
+                        .sum();
+                logger.info("후보 {}: 그림자={}%, 포인트={}/{}개",
+                        i + 1, route.getShadowPercentage(), shadowPoints, route.getPoints().size());
+            }
+
             // 가장 좋은 경로 선택 (그림자 비율 우선)
-            return reasonableRoutes.stream()
+            Route bestRoute = reasonableRoutes.stream()
                     .max((r1, r2) -> Integer.compare(r1.getShadowPercentage(), r2.getShadowPercentage()))
                     .orElse(null);
+
+            if (bestRoute != null) {
+                long shadowPoints = bestRoute.getPoints().stream()
+                        .mapToLong(p -> p.isInShadow() ? 1 : 0)
+                        .sum();
+                logger.info("선택된 경로: 그림자={}%, 실제 그림자 포인트={}개",
+                        bestRoute.getShadowPercentage(), shadowPoints);
+
+                if (bestRoute.getShadowPercentage() == 0 && !shadowAreas.isEmpty()) {
+                    logger.warn("그림자 정보 없음 ");
+                }
+            }
+
+            return bestRoute;
 
         } catch (Exception e) {
             logger.error("극단 우회 방지 경로 선택 오류: " + e.getMessage(), e);
@@ -818,7 +877,7 @@ public class RouteCandidateService {
                 return false;
             }
 
-            logger.debug("✅ 경유지 검증 통과: 우회={}%, 접근={}%, 방향차이={}도, 직선이탈={}m",
+            logger.debug("경유지 검증 통과: 우회={}%, 접근={}%, 방향차이={}도, 직선이탈={}m",
                     (int)(detourRatio * 100),
                     (int)((1 - approachRatio) * 100),
                     (int)bearingDiff,
