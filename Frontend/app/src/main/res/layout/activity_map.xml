@@ -97,21 +97,37 @@
 
     </LinearLayout>
 
-    <!-- 경로 정보 표시 -->
-    <TextView
-            android:id="@+id/tv_route_info"
+    <!-- 경로 정보 표시 + 라디오 버튼 (회색바) -->
+    <LinearLayout
+            android:id="@+id/route_info_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_below="@id/shadow_settings_panel"
             android:background="#80000000"
             android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:gravity="center"
             android:elevation="4dp"
-            android:visibility="gone" />
+            android:visibility="gone"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
+        <TextView
+                android:id="@+id/tv_route_info"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:gravity="center_vertical" />
 
+        <!-- 경로 선택 라디오 버튼들 (회색바 오른쪽) -->
+        <RadioGroup
+                android:id="@+id/rg_route_selection"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginStart="8dp" />
+
+    </LinearLayout>
 
     <!-- 경로 선택 버튼 컨테이너 -->
     <LinearLayout
