@@ -84,6 +84,8 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
     private LinearLayout routeInfoContainer;
     private RadioGroup rgRouteSelection;
     private boolean isUpdatingRadioButtons = false;
+    private boolean isRouteSelected = false; // 경로 선택 여부
+    private boolean disableAutoRouting = false; // 자동 경로 재계산 여부
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -355,6 +357,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
      * 목적지 선택 처리
      */
     private void selectDestination(TMapPOIItem item) {
+        isRouteSelected = false;
+        disableAutoRouting = false;
+
         // 검색 결과 목록 숨기기
         rvSearchResults.setVisibility(View.GONE);
 
@@ -498,14 +503,14 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
             // 지도에 현재 위치 표시
             tMapView.setLocationPoint(lon, lat);
 
-            // 트래킹 모드가 아니라면 지도 중심 업데이트
-            if (!tMapView.getIsTracking()) {
+            // 경로가 선택된 상태면 지도 중심 이동하지 않음
+            if (!isRouteSelected && !tMapView.getIsTracking()) {
                 tMapView.setCenterPoint(lon, lat);
             }
 
-            // 목적지가 설정되어 있고 경로가 없다면 경로 요청
-            if (destinationPoint != null && currentRoute == null) {
-                requestRoute();
+            // 자동 경로 재계산 방지
+            if (destinationPoint != null && currentRoute == null && !disableAutoRouting) {
+                requestRoute(); // 최초 1회만 실행
             }
         } else {
             Log.e(TAG, "위치 정보가 null입니다");
@@ -679,6 +684,15 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
      */
     private void displaySelectedRoute(RouteCandidate candidate) {
         try {
+            isRouteSelected = true;
+            disableAutoRouting = true;
+
+            // 위치 추적 일시 중단
+            if (tMapGps != null) {
+                tMapGps.setMinTime(10000);
+                tMapGps.setMinDistance(50);
+            }
+
             // 기존 경로 제거
             clearAllRoutes();
 
@@ -918,6 +932,14 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
         Log.d(TAG, "모든 경로 및 오버레이 제거");
 
         try {
+            isRouteSelected = false;
+            disableAutoRouting = false;
+
+            if(tMapGps!=null){
+                tMapGps.setMinTime(1000);
+                tMapGps.setMinDistance(5);
+            }
+
             // TMapView의 모든 폴리라인 먼저 제거
             tMapView.removeAllTMapPolyLine();
 
@@ -1090,6 +1112,9 @@ public class MapActivity extends AppCompatActivity implements TMapGpsManager.onL
      */
     private void displaySelectedRouteOnly(RouteCandidate candidate) {
         try {
+            isRouteSelected = true;
+            disableAutoRouting = true;
+
             // 기존 경로 제거
             clearAllRoutesExceptButtons(); // 라디오 버튼은 유지하고 경로만 제거
 
