@@ -5,8 +5,6 @@ import com.example.Backend.model.RoutePoint;
 import com.example.Backend.model.RouteCandidate;
 import com.example.Backend.model.SunPosition;
 import com.example.Backend.model.ShadowArea;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -174,6 +172,7 @@ public class RouteCandidateService {
     private Route generateOptimizedShadeRoute(double startLat, double startLng, double endLat, double endLng, LocalDateTime dateTime) {
         try {
             logger.info("=== 그림자 경로 생성 ===");
+            String routeType="shade";
 
             // 태양 위치 및 그림자 영역 계산
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
@@ -208,10 +207,10 @@ public class RouteCandidateService {
 
             // 극단적 우회가 아닌 경로 선택
             Route bestRoute = selectNonExtremeRoute(waypointVariants,
-                    startLat, startLng, endLat, endLng, shadowAreas, baseRoute);
+                    startLat, startLng, endLat, endLng, shadowAreas, baseRoute, routeType);
 
             if (bestRoute != null && isSignificantShadowImprovement(bestRoute, baseRoute)) {
-                bestRoute.setRouteType("shade");
+                bestRoute.setRouteType(routeType);
                 bestRoute.setWaypointCount(1);
                 logger.info("그림자 경로 선택: 그늘 {}%, 우회 {}%",
                         bestRoute.getShadowPercentage(),
@@ -234,6 +233,7 @@ public class RouteCandidateService {
     private Route generateOptimizedBalancedRoute(double startLat, double startLng, double endLat, double endLng, LocalDateTime dateTime) {
         try {
             logger.info("=== 균형 경로 생성 ===");
+            String routeType="balanced";
 
             SunPosition sunPos = shadowService.calculateSunPosition(startLat, startLng, dateTime);
             logger.info("태양 위치: 고도={}도, 방위각={}도", sunPos.getAltitude(), sunPos.getAzimuth());
@@ -265,10 +265,10 @@ public class RouteCandidateService {
 
             // 극단적 우회가 아닌 경로 선택
             Route bestRoute = selectNonExtremeRoute(waypointVariants,
-                    startLat, startLng, endLat, endLng, shadowAreas, baseRoute);
+                    startLat, startLng, endLat, endLng, shadowAreas, baseRoute,routeType);
 
             if (bestRoute != null && isModerateImprovement(bestRoute, baseRoute)) {
-                bestRoute.setRouteType("balanced");
+                bestRoute.setRouteType(routeType);
                 bestRoute.setWaypointCount(1);
                 logger.info("균형 경로 선택: 그늘 {}%, 우회 {}%",
                         bestRoute.getShadowPercentage(),
@@ -388,7 +388,7 @@ public class RouteCandidateService {
      */
     private Route selectNonExtremeRoute(List<RoutePoint> waypointVariants,
                                         double startLat, double startLng, double endLat, double endLng,
-                                        List<ShadowArea> shadowAreas, Route baseRoute) {
+                                        List<ShadowArea> shadowAreas, Route baseRoute,String routeType) {
         try {
             List<Route> candidateRoutes = new ArrayList<>();
 
@@ -402,7 +402,9 @@ public class RouteCandidateService {
                     if (route != null && !route.getPoints().isEmpty()) {
                         shadowRouteService.applyShadowInfoFromDB(route, shadowAreas);
 
-                        // 🔍 디버깅: 그림자 정보 확인
+                        route.setRouteType(routeType);
+
+                        // 디버깅: 그림자 정보 확인
                         logger.info("경유지 경로 생성: 포인트={}개, 그림자={}%",
                                 route.getPoints().size(), route.getShadowPercentage());
 
@@ -426,7 +428,7 @@ public class RouteCandidateService {
 
             // 극단적 우회 필터링 (180% 이상만 제외)
             List<Route> reasonableRoutes = candidateRoutes.stream()
-                    .filter(route -> !isExtremeDetour(route, baseRoute))
+                    .filter(route -> !isExtremeDetour(route, baseRoute,routeType))
                     .collect(Collectors.toList());
 
             logger.info("극단 우회 필터링: {}개 → {}개", candidateRoutes.size(), reasonableRoutes.size());
@@ -472,33 +474,6 @@ public class RouteCandidateService {
     }
 
     /**
-     * 극단적 우회 판정 (간단한 기준)
-     */
-    private boolean isExtremeDetour(Route route, Route baseRoute) {
-        try {
-            if (route == null || baseRoute == null || route.getPoints().isEmpty()) {
-                return true;
-            }
-
-            // 180% 이상 우회면 극단적 우회로 판정
-            double detourRatio = route.getDistance() / baseRoute.getDistance();
-            boolean isExtreme = detourRatio > 1.8;
-
-            if (isExtreme) {
-                logger.debug("극단적 우회 감지: {}% > 180%", (int)(detourRatio * 100));
-            } else {
-                logger.debug("합리적 우회: {}%", (int)((detourRatio - 1) * 100));
-            }
-
-            return isExtreme;
-
-        } catch (Exception e) {
-            logger.error("극단적 우회 판정 오류: " + e.getMessage(), e);
-            return true; // 오류 시 제외
-        }
-    }
-
-    /**
      * 그림자 경로의 의미있는 개선 확인
      */
     private boolean isSignificantShadowImprovement(Route candidate, Route baseRoute) {
@@ -524,146 +499,6 @@ public class RouteCandidateService {
         double detourRatio = candidate.getDistance() / baseRoute.getDistance();
 
         return shadowDiff >= 3 && detourRatio <= 1.6; // 160% 이하 우회
-    }
-
-    private RoutePoint createStrategicWaypoint(List<RoutePoint> basePoints, SunPosition sunPos,
-                                               boolean avoidShadow, List<ShadowArea> shadowAreas) {
-        if (basePoints.size() < 2) return null;
-
-        try {
-            RoutePoint startPoint = basePoints.get(0);
-            RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
-
-            // 중간점 계산
-            RoutePoint middlePoint = new RoutePoint(
-                    (startPoint.getLat() + endPoint.getLat()) / 2,
-                    (startPoint.getLng() + endPoint.getLng()) / 2
-            );
-
-            // 목적지 방향 계산 (북쪽 기준 0-360도)
-            double destinationDirection = calculateBearing(startPoint, endPoint);
-
-            // 원하는 경유지 방향 계산 (태양/그림자 방향)
-            double preferredDirection;
-            if (avoidShadow) {
-                preferredDirection = sunPos.getAzimuth(); // 태양 방향
-            } else {
-                preferredDirection = (sunPos.getAzimuth() + 180) % 360; // 그림자 방향
-            }
-
-            //  목적지 방향 제약 적용
-            double constrainedDirection = constrainDirectionToDestination(
-                    preferredDirection, destinationDirection);
-
-            // 경유지 거리 (짧게 유지)
-            double detourMeters = 40.0;
-
-            // 지리적 좌표로 변환
-            double directionRad = Math.toRadians(constrainedDirection);
-            double latDegreeInMeters = 111000.0;
-            double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
-
-            double latOffset = detourMeters * Math.cos(directionRad) / latDegreeInMeters;
-            double lngOffset = detourMeters * Math.sin(directionRad) / lngDegreeInMeters;
-
-            RoutePoint waypoint = new RoutePoint();
-            waypoint.setLat(middlePoint.getLat() + latOffset);
-            waypoint.setLng(middlePoint.getLng() + lngOffset);
-
-            // 경유지가 목적지 방향으로 진행하는지 검증
-            if (!isWaypointProgressive(startPoint, waypoint, endPoint)) {
-                logger.debug("경유지가 목적지 방향으로 진행하지 않음 - 거부");
-                return null;
-            }
-
-            logger.debug("제약된 경유지 생성: 원하는방향={}도, 목적지방향={}도, 최종방향={}도",
-                    preferredDirection, destinationDirection, constrainedDirection);
-
-            return waypoint;
-
-        } catch (Exception e) {
-            logger.error("제약된 경유지 계산 오류: " + e.getMessage(), e);
-            return null;
-        }
-    }
-
-    /**
-     *  경로 품질 검증
-     */
-    private boolean validateEnhancedRouteQuality(Route route, Route baseRoute, String routeType) {
-        try {
-            if (route == null || route.getPoints().isEmpty() || baseRoute == null) {
-                return false;
-            }
-
-            // 기본 검증
-            if (route.getDistance() < 50 || route.getPoints().size() < 3) {
-                logger.debug("경로 기본 검증 실패: 너무 짧거나 점이 부족");
-                return false;
-            }
-
-            // 거리 비율 검증 (더 엄격)
-            double distanceRatio = route.getDistance() / baseRoute.getDistance();
-            double maxRatio = "shade".equals(routeType) ? 1.6 : 1.4; // 그림자 160%, 균형 140%
-
-            if (distanceRatio > maxRatio) {
-                logger.debug("거리 비율 초과: {}% > {}%", (int)(distanceRatio * 100), (int)(maxRatio * 100));
-                return false;
-            }
-
-            // 그림자 효과 검증 (그림자 경로의 경우)
-            if ("shade".equals(routeType)) {
-                int shadowDiff = route.getShadowPercentage() - baseRoute.getShadowPercentage();
-                if (shadowDiff < 15) { // 최소 15% 이상 그늘 증가
-                    logger.debug("그림자 효과 부족: +{}% < 15%", shadowDiff);
-                    return false;
-                }
-            }
-
-            logger.debug("경로 품질 검증 통과: {}경로, 거리비율 {}%, 그늘 {}%",
-                    routeType, (int)(distanceRatio * 100), route.getShadowPercentage());
-            return true;
-
-        } catch (Exception e) {
-            logger.error("경로 품질 검증 오류: " + e.getMessage(), e);
-            return false;
-        }
-    }
-
-
-    /**
-     * 점과 직선 사이의 거리 계산
-     */
-    private double calculatePointToLineDistance(RoutePoint point, RoutePoint lineStart, RoutePoint lineEnd) {
-        try {
-            // 벡터 계산
-            double A = point.getLat() - lineStart.getLat();
-            double B = point.getLng() - lineStart.getLng();
-            double C = lineEnd.getLat() - lineStart.getLat();
-            double D = lineEnd.getLng() - lineStart.getLng();
-
-            double dot = A * C + B * D;
-            double lenSq = C * C + D * D;
-            double param = lenSq != 0 ? dot / lenSq : -1;
-
-            double closestLat, closestLng;
-            if (param < 0) {
-                closestLat = lineStart.getLat();
-                closestLng = lineStart.getLng();
-            } else if (param > 1) {
-                closestLat = lineEnd.getLat();
-                closestLng = lineEnd.getLng();
-            } else {
-                closestLat = lineStart.getLat() + param * C;
-                closestLng = lineStart.getLng() + param * D;
-            }
-
-            return calculateDistance(point.getLat(), point.getLng(), closestLat, closestLng);
-
-        } catch (Exception e) {
-            logger.error("점-직선 거리 계산 오류: " + e.getMessage(), e);
-            return 0.0;
-        }
     }
 
     /**
@@ -803,91 +638,6 @@ public class RouteCandidateService {
 
         double bearing = Math.toDegrees(Math.atan2(y, x));
         return (bearing + 360) % 360;
-    }
-
-    /**
-     * 경유지가 목적지 방향으로 진행하는지 검증
-     */
-    private boolean isWaypointProgressive(RoutePoint start, RoutePoint waypoint, RoutePoint end) {
-        try {
-            // 기본 거리 계산
-            double distanceToWaypoint = calculateDistance(
-                    start.getLat(), start.getLng(),
-                    waypoint.getLat(), waypoint.getLng());
-
-            double directDistance = calculateDistance(
-                    start.getLat(), start.getLng(),
-                    end.getLat(), end.getLng());
-
-            double waypointToEnd = calculateDistance(
-                    waypoint.getLat(), waypoint.getLng(),
-                    end.getLat(), end.getLng());
-
-            // 우회 비율 검증
-            double totalViaWaypoint = distanceToWaypoint + waypointToEnd;
-            double detourRatio = totalViaWaypoint / directDistance;
-            if (detourRatio > 1.15) {
-                logger.debug("우회 비율 과다: {}% > 115%", (int)(detourRatio * 100));
-                return false;
-            }
-
-            // 목적지 접근도 검증
-            double approachRatio = waypointToEnd / directDistance;
-            if (approachRatio > 0.75) {
-                logger.debug("목적지 접근 부족: {}% 남음", (int)(approachRatio * 100));
-                return false;
-            }
-
-            // 방향 일치도 검증
-            double startToWaypointBearing = calculateBearing(start, waypoint);
-            double startToEndBearing = calculateBearing(start, end);
-            double bearingDiff = Math.abs(startToWaypointBearing - startToEndBearing);
-            if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
-
-            if (bearingDiff > 75) {
-                logger.debug("방향 편차 과다: {}도 > 75도", (int)bearingDiff);
-                return false;
-            }
-
-            // 경유지가 출발-목적지 직선을 기준으로 너무 멀리 벗어나지 않는지 검증
-            double perpDistance = calculatePointToLineDistance(waypoint, start, end);
-            double maxPerpDistance = directDistance * 0.25; // 직선거리의 25% 이내
-            if (perpDistance > maxPerpDistance) {
-                logger.debug("직선 이탈 과다: {}m > {}m", (int)perpDistance, (int)maxPerpDistance);
-                return false;
-            }
-
-            // 경유지가 출발지나 목적지에 너무 가깝지 않은지 검증
-            double minDistanceFromStart = directDistance * 0.15; // 직선거리의 15% 이상
-            double minDistanceFromEnd = directDistance * 0.15;   // 직선거리의 15% 이상
-
-            if (distanceToWaypoint < minDistanceFromStart) {
-                logger.debug("출발지에 너무 가까움: {}m < {}m", (int)distanceToWaypoint, (int)minDistanceFromStart);
-                return false;
-            }
-
-            if (waypointToEnd < minDistanceFromEnd) {
-                logger.debug("목적지에 너무 가까움: {}m < {}m", (int)waypointToEnd, (int)minDistanceFromEnd);
-                return false;
-            }
-
-            // 경유지가 실제로 목적지 방향으로 전진하는지
-            if (!isActuallyProgressing(start, waypoint, end)) {
-                logger.debug("목적지 방향 전진 실패");
-                return false;
-            }
-
-            logger.debug("경유지 검증 통과: 우회={}%, 접근={}%, 방향차이={}도, 직선이탈={}m",
-                    (int)(detourRatio * 100),
-                    (int)((1 - approachRatio) * 100),
-                    (int)bearingDiff,
-                    (int)perpDistance);
-            return true;
-
-        } catch (Exception e) {
-            logger.error("경유지 진행성 검증 오류: " + e.getMessage(), e);
-            return false;
-        }
     }
 
     /**
@@ -1033,5 +783,538 @@ public class RouteCandidateService {
 
             return emergencyCandidates;
         }
+    }
+
+    /**
+     *  경로 진행 방향 분석 - 되돌아오는 구간과 비효율적 우회 감지
+     */
+    private RouteProgressionAnalysis analyzeRouteProgression(Route route, String routeType) {
+        try {
+            List<RoutePoint> points = route.getPoints();
+            if (points.size() < 3) {
+                return new RouteProgressionAnalysis(false, "포인트 수 부족");
+            }
+
+            RoutePoint startPoint = points.get(0);
+            RoutePoint endPoint = points.get(points.size() - 1);
+
+            // 각 포인트에서 목적지까지의 거리 계산
+            double[] distancesToDestination = new double[points.size()];
+            for (int i = 0; i < points.size(); i++) {
+                distancesToDestination[i] = calculateDistance(
+                        points.get(i).getLat(), points.get(i).getLng(),
+                        endPoint.getLat(), endPoint.getLng()
+                );
+            }
+
+            // 진행 방향 분석
+            int progressingSegments = 0;
+            int regressingSegments = 0;
+            int maxRegressingStreak = 0;
+            int currentRegressingStreak = 0;
+            double totalRegressingDistance = 0.0;
+            double maxRegressingSegmentDistance = 0.0;
+
+            // 연속 구간 분석
+            List<Double> segmentDistances = new ArrayList<>();
+            List<Boolean> segmentProgression = new ArrayList<>();
+
+            for (int i = 1; i < points.size(); i++) {
+                double prevDistance = distancesToDestination[i - 1];
+                double currDistance = distancesToDestination[i];
+
+                double segmentDistance = calculateDistance(
+                        points.get(i - 1).getLat(), points.get(i - 1).getLng(),
+                        points.get(i).getLat(), points.get(i).getLng()
+                );
+
+                segmentDistances.add(segmentDistance);
+                boolean isProgressing = currDistance < prevDistance;
+                segmentProgression.add(isProgressing);
+
+                if (isProgressing) {
+                    progressingSegments++;
+                    currentRegressingStreak = 0;
+                } else if (currDistance > prevDistance) {
+                    regressingSegments++;
+                    currentRegressingStreak++;
+                    maxRegressingStreak = Math.max(maxRegressingStreak, currentRegressingStreak);
+                    totalRegressingDistance += segmentDistance;
+                    maxRegressingSegmentDistance = Math.max(maxRegressingSegmentDistance, segmentDistance);
+                }
+            }
+
+            // 지그재그 패턴 감지
+            double zigzagScore = calculateZigzagScore(segmentProgression, segmentDistances);
+
+            // 기본 지표 계산
+            int totalSegments = progressingSegments + regressingSegments;
+            double progressEfficiency = totalSegments > 0 ? (double) progressingSegments / totalSegments : 1.0;
+            double maxRegressingRatio = (double) maxRegressingStreak / points.size();
+            double regressingDistanceRatio = totalRegressingDistance / route.getDistance();
+
+            // 경로 타입별 차등 기준 적용
+            ValidationCriteria criteria = getValidationCriteria(routeType, route.getShadowPercentage());
+
+            String rejectionReason = null;
+
+            // 진전 효율성 검증
+            if (progressEfficiency < criteria.minProgressEfficiency) {
+                rejectionReason = String.format("진전 효율성 부족: %.1f%% < %.1f%%",
+                        progressEfficiency * 100, criteria.minProgressEfficiency * 100);
+            }
+            // 연속 후퇴 구간 검증
+            else if (maxRegressingRatio > criteria.maxRegressingRatio) {
+                rejectionReason = String.format("연속 후퇴 구간 과다: %.1f%% > %.1f%%",
+                        maxRegressingRatio * 100, criteria.maxRegressingRatio * 100);
+            }
+            // 되돌아가는 거리 검증
+            else if (regressingDistanceRatio > criteria.maxRegressingDistanceRatio) {
+                rejectionReason = String.format("되돌아가는 거리 과다: %.1f%% > %.1f%%",
+                        regressingDistanceRatio * 100, criteria.maxRegressingDistanceRatio * 100);
+            }
+            // 지그재그 패턴 검증 (모든 경로 타입에 공통 적용)
+            else if (zigzagScore > 0.6) {
+                rejectionReason = String.format("지그재그 패턴 과다: %.1f%% > 60%%", zigzagScore * 100);
+            }
+            // 극단적 단일 후퇴 구간 검증
+            else if (maxRegressingSegmentDistance / route.getDistance() > criteria.maxSingleRegressingRatio) {
+                rejectionReason = String.format("단일 후퇴 구간 과다: %.1f%% > %.1f%%",
+                        (maxRegressingSegmentDistance / route.getDistance()) * 100,
+                        criteria.maxSingleRegressingRatio * 100);
+            }
+
+            boolean isReasonable = rejectionReason == null;
+
+            logger.debug("경로 진행 분석 [{}]: 진전효율={}%, 최대후퇴구간={}%, 되돌아가는거리={}%, 지그재그={}%, 합리적={}",
+                    routeType, (int)(progressEfficiency * 100), (int)(maxRegressingRatio * 100),
+                    (int)(regressingDistanceRatio * 100), (int)(zigzagScore * 100), isReasonable);
+
+            return new RouteProgressionAnalysis(isReasonable, rejectionReason, progressEfficiency,
+                    maxRegressingRatio, regressingDistanceRatio, maxRegressingSegmentDistance, zigzagScore);
+
+        } catch (Exception e) {
+            logger.error("경로 진행 분석 오류: " + e.getMessage(), e);
+            return new RouteProgressionAnalysis(false, "분석 오류: " + e.getMessage());
+        }
+    }
+
+    /**
+     *  경로 타입별 검증 기준 설정
+     */
+    private ValidationCriteria getValidationCriteria(String routeType, int shadowPercentage) {
+
+        // 기본값 (최단경로용)
+        double minProgressEfficiency = 0.65;
+        double maxRegressingRatio = 0.20;
+        double maxRegressingDistanceRatio = 0.25;
+        double maxSingleRegressingRatio = 0.15;
+
+        // 그림자/균형 경로는 더 관대한 기준
+        if ("shade".equals(routeType) || "balanced".equals(routeType)) {
+            minProgressEfficiency = 0.50;
+            maxRegressingRatio = 0.35;
+            maxRegressingDistanceRatio = 0.40;
+            maxSingleRegressingRatio = 0.25;
+
+            // 그림자 비율이 높을수록 더 관대
+            if (shadowPercentage >= 30) {
+                minProgressEfficiency = 0.45;
+                maxRegressingDistanceRatio = 0.45;
+            }
+            if (shadowPercentage >= 50) {
+                minProgressEfficiency = 0.40;
+                maxRegressingDistanceRatio = 0.50;
+            }
+        }
+
+        return new ValidationCriteria(minProgressEfficiency, maxRegressingRatio,
+                maxRegressingDistanceRatio, maxSingleRegressingRatio);
+    }
+
+    /**
+     *  지그재그 패턴 점수 계산 (0.0 ~ 1.0, 높을수록 지그재그)
+     */
+    private double calculateZigzagScore(List<Boolean> segmentProgression, List<Double> segmentDistances) {
+        if (segmentProgression.size() < 4) return 0.0;
+
+        int directionChanges = 0;
+        double totalShortSegments = 0.0;
+        double totalDistance = segmentDistances.stream().mapToDouble(Double::doubleValue).sum();
+
+        // 방향 변화 횟수 계산
+        for (int i = 1; i < segmentProgression.size(); i++) {
+            if (!segmentProgression.get(i).equals(segmentProgression.get(i - 1))) {
+                directionChanges++;
+            }
+        }
+
+        // 짧은 구간들의 비율 계산 (지그재그는 짧은 구간이 많음)
+        double avgSegmentDistance = totalDistance / segmentDistances.size();
+        for (double distance : segmentDistances) {
+            if (distance < avgSegmentDistance * 0.5) { // 평균의 50% 이하
+                totalShortSegments += distance;
+            }
+        }
+
+        double directionChangeRatio = (double) directionChanges / segmentProgression.size();
+        double shortSegmentRatio = totalShortSegments / totalDistance;
+
+        // 방향 변화 비율과 짧은 구간 비율의 가중 평균
+        return (directionChangeRatio * 0.7 + shortSegmentRatio * 0.3);
+    }
+
+    /**
+     *  검증 기준을 담는 클래스
+     */
+    private static class ValidationCriteria {
+        final double minProgressEfficiency;
+        final double maxRegressingRatio;
+        final double maxRegressingDistanceRatio;
+        final double maxSingleRegressingRatio;
+
+        ValidationCriteria(double minProgressEfficiency, double maxRegressingRatio,
+                           double maxRegressingDistanceRatio, double maxSingleRegressingRatio) {
+            this.minProgressEfficiency = minProgressEfficiency;
+            this.maxRegressingRatio = maxRegressingRatio;
+            this.maxRegressingDistanceRatio = maxRegressingDistanceRatio;
+            this.maxSingleRegressingRatio = maxSingleRegressingRatio;
+        }
+    }
+
+    /**
+     *  경로 품질 검증 - 경로 타입 고려
+     */
+    private boolean validateEnhancedRouteQuality(Route route, Route baseRoute, String routeType) {
+        try {
+            if (route == null || route.getPoints().isEmpty() || baseRoute == null) {
+                return false;
+            }
+
+            // 기본 검증
+            if (route.getDistance() < 50 || route.getPoints().size() < 3) {
+                logger.debug("경로 기본 검증 실패: 너무 짧거나 점이 부족");
+                return false;
+            }
+
+            // 경로 타입별 거리 비율 허용치 차등 적용
+            double distanceRatio = route.getDistance() / baseRoute.getDistance();
+            double maxRatio;
+
+            if ("shade".equals(routeType)) {
+                maxRatio = route.getShadowPercentage() >= 40 ? 2.0 : 1.8;  // 그늘 많으면 200%, 적으면 180%
+            } else if ("balanced".equals(routeType)) {
+                maxRatio = 1.6;  // 균형 경로는 160%
+            } else {
+                maxRatio = 1.4;  // 최단경로는 140%
+            }
+
+            if (distanceRatio > maxRatio) {
+                logger.debug("거리 비율 초과: {}% > {}% ({}경로)",
+                        (int)(distanceRatio * 100), (int)(maxRatio * 100), routeType);
+                return false;
+            }
+
+            // 경로 타입을 고려한 진행 방향 분석
+            RouteProgressionAnalysis progression = analyzeRouteProgression(route, routeType);
+
+            if (!progression.isReasonable()) {
+                logger.debug("경로 진행 분석 실패 [{}]: {}", routeType, progression.getReasonForRejection());
+                return false;
+            }
+
+            // 그림자 효과 검증 (그림자 경로의 경우)
+            if ("shade".equals(routeType)) {
+                int shadowDiff = route.getShadowPercentage() - baseRoute.getShadowPercentage();
+                int minShadowImprovement = route.getShadowPercentage() >= 40 ? 10 : 15;
+
+                if (shadowDiff < minShadowImprovement) {
+                    logger.debug("그림자 효과 부족: +{}% < {}%", shadowDiff, minShadowImprovement);
+                    return false;
+                }
+            }
+
+            logger.debug("경로 품질 검증 통과: {}경로, 거리비율 {}%, 그늘 {}%, 진전효율 {}%",
+                    routeType, (int)(distanceRatio * 100), route.getShadowPercentage(),
+                    (int)(progression.getProgressEfficiency() * 100));
+            return true;
+
+        } catch (Exception e) {
+            logger.error("경로 품질 검증 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 극단적 우회 판정 - 경로 타입별 차등 기준
+     */
+    private boolean isExtremeDetour(Route route, Route baseRoute, String routeType) {
+        try {
+            if (route == null || baseRoute == null || route.getPoints().isEmpty()) {
+                return true;
+            }
+
+            // 경로 타입별 거리 비율 허용치
+            double maxDistanceRatio;
+            if ("shade".equals(routeType)) {
+                maxDistanceRatio = 2.2;  // 그림자 경로는 220%까지 허용
+            } else if ("balanced".equals(routeType)) {
+                maxDistanceRatio = 1.9;  // 균형 경로는 190%까지 허용
+            } else {
+                maxDistanceRatio = 1.8;  // 기본은 180%
+            }
+
+            double detourRatio = route.getDistance() / baseRoute.getDistance();
+            if (detourRatio > maxDistanceRatio) {
+                logger.debug("극단적 우회 감지 (거리): {}% > {}% [{}경로]",
+                        (int)(detourRatio * 100), (int)(maxDistanceRatio * 100), routeType);
+                return true;
+            }
+
+            // 경로 타입을 고려한 진행 방향 분석
+            RouteProgressionAnalysis progression = analyzeRouteProgression(route, routeType);
+
+            // 그림자 경로는 진전 효율성 기준 완화
+            double minEfficiency = "shade".equals(routeType) ? 0.35 : 0.45;
+
+            if (progression.getProgressEfficiency() < minEfficiency) {
+                logger.debug("극단적 우회 감지 (진전효율): {}% < {}% [{}경로]",
+                        (int)(progression.getProgressEfficiency() * 100), (int)(minEfficiency * 100), routeType);
+                return true;
+            }
+
+            // 지그재그 패턴은 모든 경로 타입에서 금지
+            if (progression.getZigzagScore() > 0.7) {
+                logger.debug("극단적 우회 감지 (지그재그): {}% > 70% [{}경로]",
+                        (int)(progression.getZigzagScore() * 100), routeType);
+                return true;
+            }
+
+            logger.debug("합리적 우회: 거리={}%, 진전효율={}% [{}경로]",
+                    (int)((detourRatio - 1) * 100), (int)(progression.getProgressEfficiency() * 100), routeType);
+            return false;
+
+        } catch (Exception e) {
+            logger.error("극단적 우회 판정 오류: " + e.getMessage(), e);
+            return true;
+        }
+    }
+
+    /**
+     *  RouteProgressionAnalysis 클래스
+     */
+    private static class RouteProgressionAnalysis {
+        private final boolean reasonable;
+        private final String reasonForRejection;
+        private final double progressEfficiency;
+        private final double maxRegressingRatio;
+        private final double regressingDistanceRatio;
+        private final double maxRegressingSegmentDistance;
+        private final double zigzagScore;
+
+        public RouteProgressionAnalysis(boolean reasonable, String reasonForRejection) {
+            this(reasonable, reasonForRejection, 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        public RouteProgressionAnalysis(boolean reasonable, String reasonForRejection,
+                                        double progressEfficiency, double maxRegressingRatio,
+                                        double regressingDistanceRatio, double maxRegressingSegmentDistance,
+                                        double zigzagScore) {
+            this.reasonable = reasonable;
+            this.reasonForRejection = reasonForRejection;
+            this.progressEfficiency = progressEfficiency;
+            this.maxRegressingRatio = maxRegressingRatio;
+            this.regressingDistanceRatio = regressingDistanceRatio;
+            this.maxRegressingSegmentDistance = maxRegressingSegmentDistance;
+            this.zigzagScore = zigzagScore;
+        }
+
+        // Getters
+        public boolean isReasonable() { return reasonable; }
+        public String getReasonForRejection() { return reasonForRejection; }
+        public double getProgressEfficiency() { return progressEfficiency; }
+        public double getMaxRegressingRatio() { return maxRegressingRatio; }
+        public double getRegressingDistanceRatio() { return regressingDistanceRatio; }
+        public double getMaxRegressingSegmentDistance() { return maxRegressingSegmentDistance; }
+        public double getZigzagScore() { return zigzagScore; }
+    }
+
+    /**
+     *  경유지 생성 전 사전 검증 강화
+     */
+    private RoutePoint createStrategicWaypoint(List<RoutePoint> basePoints, SunPosition sunPos,
+                                               boolean avoidShadow, List<ShadowArea> shadowAreas) {
+        if (basePoints.size() < 2) return null;
+
+        try {
+            RoutePoint startPoint = basePoints.get(0);
+            RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
+
+            double progressRatio = 0.7;
+            RoutePoint middlePoint = new RoutePoint(
+                    startPoint.getLat() + (endPoint.getLat() - startPoint.getLat()) * progressRatio,
+                    startPoint.getLng() + (endPoint.getLng() - startPoint.getLng()) * progressRatio
+            );
+
+            // 목적지 방향 계산 (북쪽 기준 0-360도)
+            double destinationDirection = calculateBearing(startPoint, endPoint);
+
+            // 원하는 경유지 방향 계산 (태양/그림자 방향)
+            double preferredDirection;
+            if (avoidShadow) {
+                preferredDirection = sunPos.getAzimuth(); // 태양 방향
+            } else {
+                preferredDirection = (sunPos.getAzimuth() + 180) % 360; // 그림자 방향
+            }
+
+            // 목적지 방향 제약
+            double constrainedDirection = constrainDirectionToDestinationStrict(
+                    preferredDirection, destinationDirection);
+
+            // 경유지 거리
+            double detourMeters = 25.0;
+
+            // 지리적 좌표로 변환
+            double directionRad = Math.toRadians(constrainedDirection);
+            double latDegreeInMeters = 111000.0;
+            double lngDegreeInMeters = 111000.0 * Math.cos(Math.toRadians(middlePoint.getLat()));
+
+            double latOffset = detourMeters * Math.cos(directionRad) / latDegreeInMeters;
+            double lngOffset = detourMeters * Math.sin(directionRad) / lngDegreeInMeters;
+
+            RoutePoint waypoint = new RoutePoint();
+            waypoint.setLat(middlePoint.getLat() + latOffset);
+            waypoint.setLng(middlePoint.getLng() + lngOffset);
+
+            // 경유지 검증
+            if (!isWaypointReasonable(startPoint, waypoint, endPoint)) {
+                logger.debug("경유지 합리성 검증 실패");
+                return null;
+            }
+
+            logger.debug("개선된 경유지 생성: 진행비율={}%, 원하는방향={}도, 목적지방향={}도, 최종방향={}도",
+                    (int)(progressRatio * 100), preferredDirection, destinationDirection, constrainedDirection);
+
+            return waypoint;
+
+        } catch (Exception e) {
+            logger.error("개선된 경유지 계산 오류: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     *  목적지 방향 제약 (±45도)
+     */
+    private double constrainDirectionToDestinationStrict(double preferredDirection, double destinationDirection) {
+        try {
+            // 목적지 방향 ±45도 범위 내에서만 경유지 설정 허용
+            double maxAngleDiff = 45.0;
+
+            // 두 방향 간의 각도 차이 계산
+            double angleDiff = Math.abs(preferredDirection - destinationDirection);
+            if (angleDiff > 180) {
+                angleDiff = 360 - angleDiff;
+            }
+
+            // 각도 차이가 허용 범위 내면 그대로 사용
+            if (angleDiff <= maxAngleDiff) {
+                return preferredDirection;
+            }
+
+            // 허용 범위를 벗어나면 가장 가까운 허용 방향으로 조정
+            double constrainedDirection;
+            if (preferredDirection > destinationDirection) {
+                if (preferredDirection - destinationDirection <= 180) {
+                    constrainedDirection = (destinationDirection + maxAngleDiff) % 360;
+                } else {
+                    constrainedDirection = (destinationDirection - maxAngleDiff + 360) % 360;
+                }
+            } else {
+                if (destinationDirection - preferredDirection <= 180) {
+                    constrainedDirection = (destinationDirection - maxAngleDiff + 360) % 360;
+                } else {
+                    constrainedDirection = (destinationDirection + maxAngleDiff) % 360;
+                }
+            }
+
+            return constrainedDirection;
+
+        } catch (Exception e) {
+            logger.error("엄격한 방향 제약 계산 오류: " + e.getMessage(), e);
+            return destinationDirection;
+        }
+    }
+
+    /**
+     *  경유지 합리성 검증
+     */
+    private boolean isWaypointReasonable(RoutePoint start, RoutePoint waypoint, RoutePoint end) {
+        try {
+            // 기본 거리 계산
+            double directDistance = calculateDistance(
+                    start.getLat(), start.getLng(),
+                    end.getLat(), end.getLng());
+
+            double startToWaypoint = calculateDistance(
+                    start.getLat(), start.getLng(),
+                    waypoint.getLat(), waypoint.getLng());
+
+            double waypointToEnd = calculateDistance(
+                    waypoint.getLat(), waypoint.getLng(),
+                    end.getLat(), end.getLng());
+
+            // 경유지가 실제로 목적지에 더 가까워지는지 확인
+            if (waypointToEnd >= directDistance * 0.9) {
+                logger.debug("경유지가 목적지에 충분히 가깝지 않음: {}m vs {}m",
+                        (int)waypointToEnd, (int)(directDistance * 0.9));
+                return false;
+            }
+
+            // 전체 우회 거리가 과도하지 않은지 확인
+            double totalDistance = startToWaypoint + waypointToEnd;
+            double detourRatio = totalDistance / directDistance;
+            if (detourRatio > 1.3) {
+                logger.debug("경유지 우회 비율 과다: {}% > 130%", (int)(detourRatio * 100));
+                return false;
+            }
+
+            // 경유지가 시작점에서 목적지까지의 진행에 실제로 기여하는지 확인
+            double progressToWaypoint = directDistance - waypointToEnd;
+            double expectedProgress = startToWaypoint * Math.cos(Math.toRadians(
+                    calculateAngleBetween(start, waypoint, end)
+            ));
+
+            // 실제 진전이 예상 진전의 50% 이상이어야 함
+            if (progressToWaypoint < expectedProgress * 0.5) {
+                logger.debug("경유지 진전 효율성 부족: 실제={}m, 예상={}m",
+                        (int)progressToWaypoint, (int)(expectedProgress * 0.5));
+                return false;
+            }
+
+            logger.debug("경유지 합리성 검증 통과: 우회={}%, 진전효율={}%",
+                    (int)(detourRatio * 100),
+                    (int)((progressToWaypoint / expectedProgress) * 100));
+            return true;
+
+        } catch (Exception e) {
+            logger.error("경유지 합리성 검증 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     *  세 점 사이의 각도 계산
+     */
+    private double calculateAngleBetween(RoutePoint start, RoutePoint waypoint, RoutePoint end) {
+        double bearing1 = calculateBearing(start, waypoint);
+        double bearing2 = calculateBearing(start, end);
+
+        double angle = Math.abs(bearing1 - bearing2);
+        if (angle > 180) {
+            angle = 360 - angle;
+        }
+
+        return angle;
     }
 }
