@@ -205,7 +205,7 @@ public class RouteCandidateService {
             double shadowDiff = Math.abs(balancedRoute.getShadowPercentage() - shadeRoute.getShadowPercentage()) / 100.0;
 
             // 모든 차이가 5% 이하면 균형경로 숨김
-            boolean tooSimilar = (distanceDiff <= 0.05) && (timeDiff <= 0.05) && (shadowDiff <= 0.05);
+            boolean tooSimilar = (distanceDiff <= 0.05 ? 1 : 0) + (timeDiff <= 0.05 ? 1 : 0) + (shadowDiff <= 0.05 ? 1 : 0) >= 2;
 
             if (tooSimilar) {
                 logger.info("균형-그림자 경로 유사성 검사: 거리차이={}%, 시간차이={}%, 그늘차이={}% → 균형경로 숨김",
