@@ -193,25 +193,27 @@ public class RouteCandidateService {
                 return true;
             }
 
-            // 거리 차이 검사
-            double distanceDiff = Math.abs(balancedRoute.getDistance() - shadeRoute.getDistance())
-                    / Math.max(balancedRoute.getDistance(), shadeRoute.getDistance());
+            // 절대값 차이 기준 (더 직관적)
+            double distanceGap = Math.abs(balancedRoute.getDistance() - shadeRoute.getDistance());
+            int timeGap = Math.abs(balancedRoute.getDuration() - shadeRoute.getDuration());
+            int shadowGap = Math.abs(balancedRoute.getShadowPercentage() - shadeRoute.getShadowPercentage());
 
-            // 시간 차이 검사
-            double timeDiff = Math.abs(balancedRoute.getDuration() - shadeRoute.getDuration())
-                    / (double) Math.max(balancedRoute.getDuration(), shadeRoute.getDuration());
+            // 절대값 기준으로 유사도 판정
+            boolean distanceSimilar = distanceGap <= 300;
+            boolean timeSimilar = timeGap <= 4;
+            boolean shadowSimilar = shadowGap <= 5;
 
-            // 그늘 차이 검사
-            double shadowDiff = Math.abs(balancedRoute.getShadowPercentage() - shadeRoute.getShadowPercentage()) / 100.0;
-
-            // 셋중 2개 이상이 3%이하면 균형 숨김
-            boolean tooSimilar = (distanceDiff <= 0.03 ? 1:0) + (timeDiff <= 0.03 ? 1:0) + (shadowDiff <= 0.03 ? 1:0)>=2;
+            // 3개 중 2개 이상이 유사하면 균형경로 숨김
+            int similarCount = (distanceSimilar ? 1 : 0) + (timeSimilar ? 1 : 0) + (shadowSimilar ? 1 : 0);
+            boolean tooSimilar = similarCount >= 2;
 
             if (tooSimilar) {
-                logger.info("균형-그림자 경로 엄격한 유사성 검사 (3% 기준): → 균형경로 숨김");
+                logger.info("균형-그림자 경로 절대값 유사성: 거리차이={}m, 시간차이={}분, 그늘차이={}% ({}개 유사) → 균형경로 숨김",
+                        (int)distanceGap, timeGap, shadowGap, similarCount);
                 return false;
             } else {
-                logger.info("균형-그림자 경로 엄격한 차이 검사 (3% 기준): → 균형경로 표시");
+                logger.info("균형-그림자 경로 절대값 차이: 거리차이={}m, 시간차이={}분, 그늘차이={}% ({}개 유사) → 균형경로 표시",
+                        (int)distanceGap, timeGap, shadowGap, similarCount);
                 return true;
             }
 
