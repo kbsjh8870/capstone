@@ -105,20 +105,4 @@ public class ShadowRouteController {
         logger.debug("총 {}개 경로 응답 준비 완료", routes.size());
         return ResponseEntity.ok(routes);
     }
-
-    // (디버깅용)
-    @GetMapping("/test-shadow")
-    public ResponseEntity<String> testShadowCalculation(
-            @RequestParam double lat,
-            @RequestParam double lng,
-            @RequestParam(required = false)
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime dateTime) {
-
-        if (dateTime == null) {
-            dateTime = LocalDateTime.now();
-        }
-
-        shadowRouteService.testShadowCalculationAtPoint(lat, lng, dateTime);
-        return ResponseEntity.ok("그림자 계산 테스트 완료. 로그를 확인하세요.");
-    }
 }
