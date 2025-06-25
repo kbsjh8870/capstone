@@ -825,6 +825,22 @@ public class RouteCandidateService {
         return R * c;
     }
 
+    private double calculateDistance(RoutePoint start, RoutePoint end) {
+        final double R = 6371000; // 지구 반지름 (미터)
+
+        double lat1Rad = Math.toRadians(start.getLat());
+        double lat2Rad = Math.toRadians(end.getLat());
+        double deltaLatRad = Math.toRadians(end.getLat() - start.getLat());
+        double deltaLngRad = Math.toRadians(end.getLng() - start.getLng());
+
+        double a = Math.sin(deltaLatRad / 2) * Math.sin(deltaLatRad / 2) +
+                Math.cos(lat1Rad) * Math.cos(lat2Rad) *
+                        Math.sin(deltaLngRad / 2) * Math.sin(deltaLngRad / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+        return R * c; // 미터 단위 거리
+    }
+
     /**
      * 밤이거나 날씨가 나쁠 때: 최단경로만 3개 반환
      */
@@ -1233,7 +1249,9 @@ public class RouteCandidateService {
             RoutePoint startPoint = basePoints.get(0);
             RoutePoint endPoint = basePoints.get(basePoints.size() - 1);
 
-            double progressRatio = 0.7;
+            double totalDistance = calculateDistance(startPoint, endPoint);
+
+            double progressRatio = calculateOptimalProgressRatio(totalDistance);
             RoutePoint middlePoint = new RoutePoint(
                     startPoint.getLat() + (endPoint.getLat() - startPoint.getLat()) * progressRatio,
                     startPoint.getLng() + (endPoint.getLng() - startPoint.getLng()) * progressRatio
@@ -1255,7 +1273,8 @@ public class RouteCandidateService {
                     preferredDirection, destinationDirection);
 
             // 경유지 거리
-            double detourMeters = 25.0;
+            double detourMeters = calculateOptimalDetourDistance(totalDistance);
+
 
             // 지리적 좌표로 변환
             double directionRad = Math.toRadians(constrainedDirection);
@@ -1275,8 +1294,9 @@ public class RouteCandidateService {
                 return null;
             }
 
-            logger.debug("개선된 경유지 생성: 진행비율={}%, 원하는방향={}도, 목적지방향={}도, 최종방향={}도",
-                    (int)(progressRatio * 100), preferredDirection, destinationDirection, constrainedDirection);
+            logger.debug("거리별 최적화 경유지 생성: 총거리={}m, 진행비율={}%, 우회거리={}m, 원하는방향={}도, 목적지방향={}도, 최종방향={}도",
+                    (int)totalDistance, (int)(progressRatio * 100), (int)detourMeters,
+                    preferredDirection, destinationDirection, constrainedDirection);
 
             return waypoint;
 
@@ -1285,6 +1305,35 @@ public class RouteCandidateService {
             return null;
         }
     }
+
+    private double calculateOptimalProgressRatio(double totalDistance) {
+        if (totalDistance <= 1000) {
+            return 0.7;      // 1km 이하: 70%
+        } else if (totalDistance <= 2000) {
+            return 0.65;     // 1-2km: 65%
+        } else if (totalDistance <= 3000) {
+            return 0.6;      // 2-3km: 60%
+        } else if (totalDistance <= 4000) {
+            return 0.55;     // 3-4km: 55%
+        } else if (totalDistance <= 5000) {
+            return 0.5;      // 4-5km: 50% (중간점)
+        } else {
+            return 0.45;     // 5km 이상: 45%
+        }
+    }
+
+    private double calculateOptimalDetourDistance(double totalDistance) {
+        if (totalDistance <= 1000) {
+            return 25.0;     // 1km 이하: 25m
+        } else if (totalDistance <= 3000) {
+            return 35.0;     // 1-3km: 35m
+        } else if (totalDistance <= 5000) {
+            return 50.0;     // 3-5km: 50m
+        } else {
+            return 75.0;     // 5km 이상: 75m
+        }
+    }
+
 
     /**
      *  목적지 방향 제약 (±45도)
