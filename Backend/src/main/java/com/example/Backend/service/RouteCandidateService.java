@@ -193,7 +193,7 @@ public class RouteCandidateService {
                 return true;
             }
 
-            // 절대값 차이 기준 (더 직관적)
+            // 절대값 차이 기준
             double distanceGap = Math.abs(balancedRoute.getDistance() - shadeRoute.getDistance());
             int timeGap = Math.abs(balancedRoute.getDuration() - shadeRoute.getDuration());
             int shadowGap = Math.abs(balancedRoute.getShadowPercentage() - shadeRoute.getShadowPercentage());
@@ -695,42 +695,6 @@ public class RouteCandidateService {
 
         double bearing = Math.toDegrees(Math.atan2(y, x));
         return (bearing + 360) % 360;
-    }
-
-    /**
-     *  실제로 목적지 방향으로 전진하는지 벡터 검증
-     */
-    private boolean isActuallyProgressing(RoutePoint start, RoutePoint waypoint, RoutePoint end) {
-        try {
-            // 출발지 → 목적지 벡터
-            double targetVectorLat = end.getLat() - start.getLat();
-            double targetVectorLng = end.getLng() - start.getLng();
-
-            // 출발지 → 경유지 벡터
-            double waypointVectorLat = waypoint.getLat() - start.getLat();
-            double waypointVectorLng = waypoint.getLng() - start.getLng();
-
-            // 벡터 내적 계산 (같은 방향이면 양수)
-            double dotProduct = targetVectorLat * waypointVectorLat + targetVectorLng * waypointVectorLng;
-
-            // 목적지 벡터의 크기 제곱
-            double targetMagnitudeSquared = targetVectorLat * targetVectorLat + targetVectorLng * targetVectorLng;
-
-            // 내적이 목적지 벡터 크기의 50% 이상이어야 함 (실제 전진)
-            double minDotProduct = targetMagnitudeSquared * 0.5;
-
-            boolean isProgressing = dotProduct >= minDotProduct;
-
-            if (!isProgressing) {
-                logger.debug("벡터 내적 검증 실패: {} < {}", dotProduct, minDotProduct);
-            }
-
-            return isProgressing;
-
-        } catch (Exception e) {
-            logger.error("벡터 전진 검증 오류: " + e.getMessage(), e);
-            return true; // 오류 시 허용
-        }
     }
 
     /**
