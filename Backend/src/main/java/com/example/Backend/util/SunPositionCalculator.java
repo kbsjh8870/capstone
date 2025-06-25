@@ -84,7 +84,6 @@ public class SunPositionCalculator {
                 1.25 * eccentEarthOrbit * eccentEarthOrbit *
                         Math.sin(2 * Math.toRadians(geomMeanAnomSun)));
 
-        // *** 핵심 수정: 시간각 계산을 Local Solar Time 기준으로 수정 ***
         // 15. 로컬 태양시 계산
         double localSolarTime = (utcDateTime.getHour() * 60 + utcDateTime.getMinute() +
                 utcDateTime.getSecond() / 60.0 + eqOfTime + longitude * 4) / 60.0;
@@ -135,7 +134,6 @@ public class SunPositionCalculator {
                             (Math.cos(Math.toRadians(latitude)) * Math.sin(Math.toRadians(solarZenithAngle)))))) % 360;
         }
 
-        // *** 디버깅 로그 추가 ***
         System.out.printf("태양 위치 계산: 입력시간=%s, UTC=%s, 경도=%.3f, 위도=%.3f%n",
                 dateTime, utcDateTime, longitude, latitude);
         System.out.printf("계산 결과: 고도=%.2f도, 방위각=%.2f도, 시간각=%.2f도%n",
