@@ -187,39 +187,101 @@ public class RouteCandidateService {
      */
     private boolean shouldShowBalancedRoute(Route balancedRoute, Route shadeRoute, Route shortestRoute) {
         try {
-            // 그림자 경로가 없으면 균형경로 표시
+            // 최단경로와의 유사도 체크
+            if (shortestRoute != null && isSimilarToShortestRoute(balancedRoute, shortestRoute)) {
+                logger.info("균형경로가 최단경로와 유사하여 숨김");
+                return false;
+            }
+
+            // 그림자 경로가 없으면 균형경로 표시 (최단경로 체크 통과한 경우)
             if (shadeRoute == null) {
-                logger.debug("그림자경로 없음 → 균형경로 표시");
+                logger.debug("그림자경로 없음 & 최단경로와 다름 → 균형경로 표시");
                 return true;
             }
 
+            // 그림자 경로와의 유사도 체크
+            if (isSimilarToShadeRoute(balancedRoute, shadeRoute)) {
+                logger.info("균형경로가 그림자경로와 유사하여 숨김");
+                return false;
+            }
+
+            // 모든 체크 통과, 균형경로 표시
+            logger.info("균형경로가 최단경로, 그림자경로 모두와 충분히 다름 → 표시");
+            return true;
+
+        } catch (Exception e) {
+            logger.error("균형경로 표시 여부 판단 오류: " + e.getMessage(), e);
+            return true;
+        }
+    }
+
+    /**
+     *  균형경로와 최단경로의 유사도 체크
+     */
+    private boolean isSimilarToShortestRoute(Route balancedRoute, Route shortestRoute) {
+        try {
+            // 절대값 차이 기준
+            double distanceGap = Math.abs(balancedRoute.getDistance() - shortestRoute.getDistance());
+            int timeGap = Math.abs(balancedRoute.getDuration() - shortestRoute.getDuration());
+            int shadowGap = Math.abs(balancedRoute.getShadowPercentage() - shortestRoute.getShadowPercentage());
+
+            // 최단경로와의 유사도 기준
+            boolean distanceSimilar = distanceGap <= 200;
+            boolean timeSimilar = timeGap <= 3;
+            boolean shadowSimilar = shadowGap <= 8;
+
+            // 3개 중 2개 이상이 유사하면 최단경로와 유사로 판정
+            int similarCount = (distanceSimilar ? 1 : 0) + (timeSimilar ? 1 : 0) + (shadowSimilar ? 1 : 0);
+            boolean tooSimilar = similarCount >= 2;
+
+            if (tooSimilar) {
+                logger.info("균형-최단 경로 유사성: 거리차이={}m, 시간차이={}분, 그늘차이={}% ({}개 유사) → 유사함",
+                        (int)distanceGap, timeGap, shadowGap, similarCount);
+            } else {
+                logger.debug("균형-최단 경로 차이: 거리차이={}m, 시간차이={}분, 그늘차이={}% ({}개 유사) → 다름",
+                        (int)distanceGap, timeGap, shadowGap, similarCount);
+            }
+
+            return tooSimilar;
+
+        } catch (Exception e) {
+            logger.error("최단경로 유사도 체크 오류: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 균형경로와 그림자경로의 유사도 체크
+     */
+    private boolean isSimilarToShadeRoute(Route balancedRoute, Route shadeRoute) {
+        try {
             // 절대값 차이 기준
             double distanceGap = Math.abs(balancedRoute.getDistance() - shadeRoute.getDistance());
             int timeGap = Math.abs(balancedRoute.getDuration() - shadeRoute.getDuration());
             int shadowGap = Math.abs(balancedRoute.getShadowPercentage() - shadeRoute.getShadowPercentage());
 
-            // 절대값 기준으로 유사도 판정
+            // 그림자경로와의 유사도 기준
             boolean distanceSimilar = distanceGap <= 300;
             boolean timeSimilar = timeGap <= 4;
             boolean shadowSimilar = shadowGap <= 5;
 
-            // 3개 중 2개 이상이 유사하면 균형경로 숨김
+            // 3개 중 2개 이상이 유사하면 그림자경로와 유사로 판정
             int similarCount = (distanceSimilar ? 1 : 0) + (timeSimilar ? 1 : 0) + (shadowSimilar ? 1 : 0);
             boolean tooSimilar = similarCount >= 2;
 
             if (tooSimilar) {
-                logger.info("균형-그림자 경로 절대값 유사성: 거리차이={}m, 시간차이={}분, 그늘차이={}% ({}개 유사) → 균형경로 숨김",
+                logger.info("균형-그림자 경로 유사성: 거리차이={}m, 시간차이={}분, 그늘차이={}% ({}개 유사) → 유사함",
                         (int)distanceGap, timeGap, shadowGap, similarCount);
-                return false;
             } else {
-                logger.info("균형-그림자 경로 절대값 차이: 거리차이={}m, 시간차이={}분, 그늘차이={}% ({}개 유사) → 균형경로 표시",
+                logger.debug("균형-그림자 경로 차이: 거리차이={}m, 시간차이={}분, 그늘차이={}% ({}개 유사) → 다름",
                         (int)distanceGap, timeGap, shadowGap, similarCount);
-                return true;
             }
 
+            return tooSimilar;
+
         } catch (Exception e) {
-            logger.error("균형경로 표시 여부 판단 오류: " + e.getMessage(), e);
-            return true; // 오류 시 표시
+            logger.error("그림자경로 유사도 체크 오류: " + e.getMessage(), e);
+            return false;
         }
     }
 
