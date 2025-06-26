@@ -49,7 +49,7 @@ capstone/
 
 ## 🗄️ 데이터베이스 구조
 
-### 건물 정보 테이블 (`AL_D010_26_20250304`)
+### 건물 정보 테이블 (`AL_D010_26_20250304`) - 공공데이터포탈, 브이월드 (  https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&pageIndex=1&pageSize=10&pageUnit=10&dataSetSeq=18&svcCde=NA&datPageIndex=1&datPageSize=10&startDate=2024-06-26&endDate=2025-06-26&sidoCd=26&fileGbnCd=&dsNm=&formatSelect=)
 
 부산광역시 GIS 건물 통합 정보, 그림자 계산의 기반이 되는 핵심 데이터.
 
